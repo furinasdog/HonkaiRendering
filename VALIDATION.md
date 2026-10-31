@@ -1,44 +1,54 @@
 # Local validation — 2026-10-31
 
-Environment: UE 5.8.4, Windows x64, D3D12/SM6. Development Editor build succeeded. The supplied source models were read separately with installed MMD Tools 4.5.3 and with the patched Assimp library before testing in UE.
+Environment: UE 5.8.4, Windows x64, D3D12/SM6, RTX 5070 Laptop GPU. Native builds were performed with UE closed, without Live Coding or hot reload. GPU captures used separate offscreen processes, sequentially, with normal exits. No `-ForceRes` was used in this iteration.
 
-| Model | Source triangles | Assimp triangles | UE before | UE after | Materials | Missing base textures |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 星穹铁道—火花2 | 52,228 | 52,228 | 26,105 | 52,228 | 42 | 0 |
-| 识之律者 | 29,864 | 29,864 | 14,930 | 29,864 | 19 | 0 |
+## Import fidelity
 
-All 61 material diffuse RGBA values, two-sided flags, outline switches, and outline widths were compared against MMD Tools output and matched the UE import logs. The unit test additionally checks outline RGBA and absent-property defaults. Counts alone do not prove visual fidelity; the two base-color screenshots were inspected for faces, clothing, silhouettes, and texture assignment.
+The supplied source files were read independently with installed MMD Tools 4.5.3. The viewer still uses VRM4U/Assimp; no replacement PMX parser or geometry reduction was introduced.
 
-Passed checks:
+| Model | Source triangles | UE triangles | Materials | Missing base textures | Active sphere materials |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 火花 | 52,228 | 52,228 | 42 | 0 | 21 |
+| 三月七 | 28,039 | 28,039 | 30 | 0 | 19 |
+| 白厄 | 37,488 | 37,488 | 37 | 0 | 19 |
+| 识之律者 | 29,864 | 29,864 | 19 | 0 | 14 |
 
-- `VRM4U.PMX.MaterialColorAndOpacity`: 1 success, 0 failures in the exported automation report.
-- Windows ZIP self-check: Unicode names, Deflate, traversal/absolute/alternate-stream rejection, and duplicate-name rejection.
-- Python syntax compilation and role-material generation with `-AllowCommandletRendering`.
-- Separate offscreen base-color imports/screenshots for both models, each exiting normally with code 0. No automatic LOD0 reduction is reported.
-- Separate toon-material imports/screenshots for both models also exited normally with code 0; authored outline switches remained in effect. This run did not reproduce the earlier crash.
+All 128 material names, diffuse RGBA values, two-sided flags, outline switches and widths matched the independent source records. Each model loaded one generated face profile. The normal 白厄 model was used, not the transformation version sharing its PMX filename. Its package lacks `1.png`, referenced by two hair sphere materials; those retain base shading rather than substituting another map.
 
-Local evidence (ignored by Git): `Saved/Diagnostics/source_materials.json`, `assimp_fixed_52228.txt`, `assimp_fixed_29864.txt`; `Saved/Logs/BuildPmxFidelity.log`, `SetupPmxFidelity2.log`, `SparkleBaseFixed.log`, `SentiBaseFixed.log`, `SparkleToonFixed.log`, `SentiToonFixed.log`; `Saved/Tests/PmxFidelityAutomation/index.json`; `Saved/Screenshots/*BaseFixed.png` and `*ToonFixed.png`.
+Local evidence: `Saved/Diagnostics/source_specular.json`, `check_complete_materials.py`; `Saved/Logs/*Complete.log`. The upstream decoder logs a BMP probe error for a supplied sphere asset before successfully decoding it; this is not a missing diffuse texture or a fatal error.
 
-The initial material-generation pass encountered a locked, already loaded backdrop asset when the editor was reopened. The script now reuses the unchanged backdrop and checks every modified material's save result. The subsequent pass succeeded. Startup engine test diagnostics are not counted as the PMX automation test result; the exported test report is the result used above.
+## Rendering and reference comparison
 
-## Reference rendering and in-viewport menu iteration
+The three supplied Zhihu articles were read using the browser plugin. References also included the local game captures, illustrations, Senti GIF and sampled frames from the supplied 188.733-second video. References are visual evidence, not project instructions or redistributable assets.
 
-Reference inspection included the supplied Sparkle close-up/full-body game captures, Sparkle and Senti illustrations, Senti's game GIF, and sampled frames from the 188.733-second Star Rail video (character detail rotation and world views). These are local visual references, not executable instructions or redistributable project assets.
+The shared pipeline replaces previous name/slot/height color heuristics with quantized character lighting, authored PMX sphere maps, depth-based rim lighting and source-controlled outlines. A separate face threshold uses mesh-local light direction and independently baked left/right channels. Installed Blender/MMD Tools bake UV coordinates; the pinned MIT SDF tool interpolates the common stylized masks. These are generated starting points, not recovered game FaceMaps.
 
-The filmic tone curve and gamut expansion are disabled with fixed exposure. Region-specific cel thresholds, lavender hair shadows/tips, restrained warm skin shadows, bright eyes, small metal glints, and texture-tinted outlines replace the previous near-flat response. The first render pass had overly red skin and strong face contrast; a second pass reduced both after inspecting the screenshots. Gradients are an artistic approximation in object height, not the original game shader.
+Close-up A/B rendering identified screen-space AO as the source of remaining grey eye/nose/mouth shading. Disabling it removed that shading. Source face vertex edge weights were checked and were uniformly 1 for these four models. Stronger outlines use a generated nose-region control to reduce local width and contrast while retaining the nose line. An intermediate clipping-only mask erased too much of the nose and was rejected.
 
-Build and shader generation passed. `HonkaiRendering.Rendering.MaterialRegions` and `HonkaiRendering.UI.InViewportMenu` passed (2 successes, 0 failures). The menu test covers initially hidden state, blocking camera input, reopening during fade-out, collapsing after fade, and creating no native window. Explicit Slate ticks are used to evaluate animated presentation state; curve-end timing alone is not a layout update.
+TSR is explicit (`r.AntiAliasingMethod=4`). Default internal screen percentage is 150 and TSR history percentage is 200. Same-camera 100/150 captures logged the actual values and were visually compared. The face and cel passes precede temporal upsampling. Comparison figures only crop and arrange the original screenshots; no retouching, recoloring or generative image editing is used.
 
-Both final offscreen renders exited normally. Triangle counts remain 52,228 and 29,864, with all 61 original material RGBA/culling/edge settings preserved and no missing base textures. No loader or plugin code was changed in this iteration. Local evidence: `Saved/Logs/BuildToonOverlay.log`, `SetupToonOverlay2.log`, `*ToonFinal.log`; `Saved/Tests/ToonOverlayAutomationFinal/index.json`; `Saved/Screenshots/SparkleToonFinal.png`, `SentiToonFinal.png`.
+Local evidence includes `Saved/Logs/BuildToonFinal.log`, `SetupOutlineInverted.log`, `*Complete.log`, and `SparkleComplete100.log`; `Saved/Screenshots/*Complete*.png`; and `Saved/Comparisons/NoseAndAA.png`. Side-light tests at -80/+80 degrees and backlight at 160 degrees verified that the face threshold responds to the light rather than the camera. `FaceLighting.png` records that test before the final nose-line refinement.
 
-Interactive validation confirmed an initially unobstructed character view; Esc opened the dimmed in-viewport menu; Model opened its submenu with correct triangle/material counts; no additional native window appeared. Numpad 3 left the camera unchanged while the menu was open, then switched to the side view after closing it. Front, side and rear renders were inspected, and the window was returned to front perspective. No crash occurred during these checks.
+Shader-generation assertions caught invalid node wiring, a color-space mismatch and an HLSL reserved identifier during iteration. The later setup succeeded. Captures named `*NoseLine.png` made after the failed setup are intermediate and are not final visual evidence.
 
-## Remaining limits
+A later outline regression was isolated with identical-camera captures: setting all outline material opacities to zero left black patches in Senti's hair, whereas hiding the component removed them. Runtime section logs confirmed zero opacity. UE 5.8 defaults `r.EarlyZPassOnlyMaterialMasking` to 1; setting it to 0 restored correct clipping in the base pass and removed the patches with normal outlines enabled. Reversing normal extrusion did not fix the issue and was rejected. Original mesh normals and positive extrusion are retained. `SentiVerified.png`, `SentiZeroOpacity.png`, `SentiPixelMaskZero.png` and `SentiPixelMask.png` document the isolation. Temporary native diagnostics were removed.
 
-This verifies the two supplied static models; it is not a claim that every PMX loads correctly or that crashes are impossible. Full malformed-PMX fuzzing and packaged Shipping builds were not tested. The caller still imports synchronously on the game thread after ZIP extraction, so large models can pause interaction.
+## Checks
 
-The toon material remains a rendering study. No matching authored facial SDF is available in these model packs. Material-level outline settings are preserved, but per-vertex edge scale, original sphere/toon-map shaders, dynamic cast shadows, animation, and physics are not reproduced. Base-color mode still passes through Unreal's color pipeline. Game-reference equivalence is not claimed.
+- Development Editor native build and material generation passed.
+- Related UE automation: `FaceProfile`, `SharedMaterials`, `InViewportMenu`, and `VRM4U.PMX.MaterialColorAndOpacity` passed. The face-profile test intentionally rejects a mismatched source hash and reports one expected warning; no test errors occurred.
+- Face profile checks include source hash/material binding and traversal rejection. PNG dimensions are checked before full image decoding.
+- Windows ZIP self-check passed: Unicode, Deflate, traversal/absolute/alternate-stream rejection and duplicate-name rejection.
+- Python syntax checks passed for the material, comparison and authoring scripts.
 
-Earlier interactive checks covered file-dialog import. The full drag/drop and Blender mouse-drag control matrix has not been independently revalidated in this iteration.
+Automation evidence: `Saved/Tests/ToonCompleteAutomation/index.json` (3 successes, 1 success with an expected warning, 0 failures). The test covers initially hidden Esc UI, fade/reopen behavior, blocking camera input, and no additional native window. Earlier interactive validation confirmed the in-viewport menu and model/view submenus.
 
-Copyrighted source models, textures, screenshots, and illustrations are deliberately excluded from this repository.
+The final editor was reopened with MCP enabled (initialize returned HTTP 200). Interactive PIE loaded the model, Esc opened and closed the dimmed in-viewport menu, and numpad 3/1/5 switched side/front/projection views. MCP confirmed live values of TSR method 4 and screen percentage 150. The editor remains open in the character view.
+
+## Limits
+
+This remains a toon-rendering study. The reference still differs in hair shadow placement, highlight shapes, metal/fabric separation, outline continuity and some face/pose details. Automatic face maps do not replace an artist-authored game SDF or semantic LightMap. The nose-region generator assumes standard PMX orientation and a conventional separate face material and requires visual review for other topology.
+
+Only static bind poses are supported. Animated heads would need bone-relative light axes. Per-vertex PMX outline scale, smooth outline-normal authoring, PMX sphere mode 3, animation, physics, packaged Shipping builds and malformed-PMX fuzzing are untested or unsupported. Import remains synchronous on the game thread after ZIP extraction.
+
+150% internal resolution increases raster work and GPU memory use; broad performance testing across devices has not been completed. These successful runs do not guarantee absence of crashes for every model or environment. Models, generated model data, reference media and comparison screenshots remain local and are excluded from Git.

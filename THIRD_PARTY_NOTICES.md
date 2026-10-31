@@ -10,9 +10,15 @@ The fork starts from upstream tag `v1.2026.10.17` (`7395b50e9aa50245c8677132d805
 
 The VRM4U fork includes a rebuilt Assimp Windows library and pins [the adapted Assimp source](https://github.com/furinasdog/assimp) at `ThirdParty/assimp-source`. The source baseline is `ruyo/assimp` commit `06c4e29a3c873648a107de9c1ac50f687b4d50d8`. The change exports existing PMX culling and outline fields; it does not replace the parser. Assimp retains its BSD 3-clause license; see the source `LICENSE` and bundled `ThirdParty/assimp/LICENSE`. Source initialization and build instructions are documented in the VRM4U fork.
 
+## SDF authoring tool
+
+`Tools/sdf-shadow-threshold-map` pins the unmodified [SDF Shadow Threshold Map tool](https://github.com/akasaki1211/sdf_shadow_threshold_map), copyright 2024 Hiroyuki Akasaki, under MIT. Its license remains in the submodule. The optional offline authoring scripts call this tool using separately installed NumPy/OpenCV and use installed Blender/MMD Tools to read PMX and bake UV coordinates. Those applications retain their own licenses and are not bundled or linked into the UE application. Generated model data remains local and is subject to the source model's terms.
+
 ## Unreal Engine templates
 
 Existing template files under `Source/HonkaiRendering` retain their Epic Games copyright notices. Unreal Engine and template-derived code are subject to their applicable Epic license, not a replacement MIT license from this repository. The engine installation and engine binaries are not included here.
+
+`Content/MmdViewer/T_LinearWhite` is a linear-sampling copy of Unreal's white fallback texture and retains the applicable Epic content terms.
 
 ## Reference media
 

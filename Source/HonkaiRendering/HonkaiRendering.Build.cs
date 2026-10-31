@@ -21,7 +21,7 @@ public class HonkaiRendering : ModuleRules
 			"Slate"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "SlateCore", "VRM4U", "VRM4ULoader", "RenderCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "SlateCore", "VRM4U", "VRM4ULoader", "RenderCore", "Json", "ImageWrapper" });
 		RuntimeDependencies.Add("$(ProjectDir)/Scripts/Expand-MmdArchive.ps1", StagedFileType.NonUFS);
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{

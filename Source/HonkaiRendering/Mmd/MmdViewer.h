@@ -45,9 +45,11 @@ private:
 	UPROPERTY() TObjectPtr<UMaterialInterface> ToonMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInterface> ToonTwoSidedMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInterface> OutlineMaterial;
+	UPROPERTY() TObjectPtr<UMaterialInterface> FaceOutlineMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInterface> TranslucentMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInterface> TranslucentTwoSidedMaterial;
 	FVector Target = FVector(0, 0, 80), ModelCenter = FVector(0, 0, 80);
+	FVector KeyDirection = FVector::ForwardVector;
 	FRotator Rotation = FRotator(-5, 180, 0);
 	float Distance = 350, ModelRadius = 100;
 	bool bOrthographic = false;

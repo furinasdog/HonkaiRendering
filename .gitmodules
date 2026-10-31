@@ -2,3 +2,6 @@
 	path = Plugins/VRM4U
 	url = https://github.com/furinasdog/VRM4U.git
 	branch = honkai-rendering/ue5.8
+[submodule "Tools/sdf-shadow-threshold-map"]
+	path = Tools/sdf-shadow-threshold-map
+	url = https://github.com/akasaki1211/sdf_shadow_threshold_map.git

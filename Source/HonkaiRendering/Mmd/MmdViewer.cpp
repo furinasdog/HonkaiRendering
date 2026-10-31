@@ -4,6 +4,8 @@
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/DirectionalLight.h"
+#include "Components/DirectionalLightComponent.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
@@ -13,6 +15,12 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
+#include "Misc/SecureHash.h"
+#include "Serialization/JsonSerializer.h"
+#include "ImageUtils.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
 #include "Misc/Base64.h"
@@ -46,20 +54,76 @@ THIRD_PARTY_INCLUDES_END
 namespace
 {
 	FLinearColor Panel(0.045f, 0.057f, 0.075f, 1), Text(0.82f, 0.86f, 0.91f, 1), Muted(0.43f, 0.51f, 0.61f, 1);
+
+    bool SafeFaceTextureName(const FString& Name)
+    {
+        return !Name.IsEmpty() && Name == FPaths::GetCleanFilename(Name)
+            && !Name.Contains(TEXT(":")) && !Name.Contains(TEXT(".."))
+            && FPaths::GetExtension(Name).Equals(TEXT("png"), ESearchCase::IgnoreCase);
+    }
+
+    TMap<int32, UTexture2D*> LoadFaceMaps(const FString& ModelPath, UVrmAssetListObject* Asset)
+    {
+        TMap<int32, UTexture2D*> Result;
+        TArray<uint8> ModelBytes;
+        if (!FFileHelper::LoadFileToArray(ModelBytes, *ModelPath)) return Result;
+        FSHAHash Hash;
+        FSHA1::HashBuffer(ModelBytes.GetData(), ModelBytes.Num(), Hash.Hash);
+        const FString SourceHash = Hash.ToString().ToLower();
+        // Portable sidecars take precedence over the local authoring cache.
+        FString ProfilePath = ModelPath + TEXT(".toon.json");
+        if (!FPaths::FileExists(ProfilePath)) ProfilePath = FPaths::ProjectSavedDir() / TEXT("MmdShading") / SourceHash / TEXT("profile.json");
+        const int64 ProfileSize = IFileManager::Get().FileSize(*ProfilePath);
+        if (ProfileSize <= 0 || ProfileSize > 65536) return Result;
+        FString TextValue;
+        TSharedPtr<FJsonObject> Profile;
+        if (!FFileHelper::LoadFileToString(TextValue, *ProfilePath)
+            || !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(TextValue), Profile) || !Profile) return Result;
+        FString DeclaredHash;
+        double Version = 0;
+        const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+        if (!Profile->TryGetNumberField(TEXT("version"), Version) || Version != 1
+            || !Profile->TryGetStringField(TEXT("source_sha1"), DeclaredHash) || DeclaredHash != SourceHash
+            || !Profile->TryGetArrayField(TEXT("materials"), Entries) || Entries->Num() > Asset->SkeletalMesh->GetMaterials().Num())
+        {
+            UE_LOG(LogTemp, Warning, TEXT("MMD_FACE_PROFILE rejected: incompatible profile %s"), *ProfilePath);
+            return Result;
+        }
+        for (const auto& Entry : *Entries)
+        {
+            const TSharedPtr<FJsonObject>* Object = nullptr;
+            if (!Entry->TryGetObject(Object) || !Object || !Object->IsValid()) continue;
+            double Index = -1;
+            FString Name, TextureName;
+            if (!(*Object)->TryGetNumberField(TEXT("index"), Index) || Index < 0
+                || Index >= Asset->SkeletalMesh->GetMaterials().Num() || Index != FMath::FloorToDouble(Index)
+                || !(*Object)->TryGetStringField(TEXT("name"), Name)
+                || Name != Asset->SkeletalMesh->GetMaterials()[int32(Index)].MaterialSlotName.ToString()
+                || !(*Object)->TryGetStringField(TEXT("texture"), TextureName) || !SafeFaceTextureName(TextureName)) continue;
+            const FString TexturePath = FPaths::GetPath(ProfilePath) / TextureName;
+            const int64 Bytes = IFileManager::Get().FileSize(*TexturePath);
+            if (Bytes <= 0 || Bytes > 4 * 1024 * 1024) continue;
+            TArray<uint8> Buffer;
+            if (!FFileHelper::LoadFileToArray(Buffer, *TexturePath)) continue;
+            auto Decoder = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper")).CreateImageWrapper(EImageFormat::PNG);
+            if (!Decoder->SetCompressed(Buffer.GetData(), Buffer.Num()) || Decoder->GetWidth() > 2048 || Decoder->GetHeight() > 2048) continue;
+            if (auto* Texture = FImageUtils::ImportBufferAsTexture2D(Buffer))
+            {
+                Texture->SRGB = false;
+                Texture->AddressX = Texture->AddressY = TA_Clamp;
+                Texture->UpdateResource();
+                Asset->Textures.Add(Texture);
+                Result.Add(int32(Index), Texture);
+            }
+        }
+        UE_LOG(LogTemp, Display, TEXT("MMD_FACE_PROFILE materials=%d source=%s"), Result.Num(), *SourceHash);
+        return Result;
+    }
 	TSharedRef<STextBlock> Label(const FString& Value, int32 Size = 12, FLinearColor Color = Text)
 	{
 		return SNew(STextBlock).Text(FText::FromString(Value)).Font(FCoreStyle::GetDefaultFontStyle("Regular", Size)).ColorAndOpacity(Color);
 	}
-    float MaterialRegion(const FString& Name)
-    {
-    float Region = 0;
-    if (Name.Contains(TEXT("顏")) || Name.Contains(TEXT("顔")) || Name.Contains(TEXT("颜")) || Name.Contains(TEXT("脸")) || Name.Contains(TEXT("face"), ESearchCase::IgnoreCase)) Region = 1;
-    else if (Name.Contains(TEXT("髪")) || Name.Contains(TEXT("头发")) || Name.Contains(TEXT("hair"), ESearchCase::IgnoreCase)) Region = 2;
-    else if (Name.Contains(TEXT("肌")) || Name.Contains(TEXT("皮肤")) || Name == TEXT("手") || Name == TEXT("足2") || Name.Contains(TEXT("skin"), ESearchCase::IgnoreCase)) Region = 3;
-    else if (Name.Contains(TEXT("目")) || Name.Contains(TEXT("眼")) || Name.Contains(TEXT("eye"), ESearchCase::IgnoreCase)) Region = 4;
-    else if (Name.Contains(TEXT("金")) || Name.Contains(TEXT("metal"), ESearchCase::IgnoreCase)) Region = 5;
-        return Region;
-    }
+
 }
 
 class SMmdMenu : public SCompoundWidget
@@ -247,18 +311,61 @@ public:
 };
 
 #if WITH_DEV_AUTOMATION_TESTS
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdRegionTest, "HonkaiRendering.Rendering.MaterialRegions",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdFaceProfileTest, "HonkaiRendering.Rendering.FaceProfile",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-bool FMmdRegionTest::RunTest(const FString& Parameters)
+bool FMmdFaceProfileTest::RunTest(const FString& Parameters)
 {
-    TestEqual(TEXT("Face"), MaterialRegion(TEXT("顏+")), 1.f);
-    TestEqual(TEXT("Hair"), MaterialRegion(TEXT("短头发")), 2.f);
-    TestEqual(TEXT("Hair accessory stays fabric"), MaterialRegion(TEXT("发饰")), 0.f);
-    TestEqual(TEXT("Skin"), MaterialRegion(TEXT("皮肤")), 3.f);
-    TestEqual(TEXT("Bare hands"), MaterialRegion(TEXT("手")), 3.f);
-    TestEqual(TEXT("Gloves stay fabric"), MaterialRegion(TEXT("手套")), 0.f);
-    TestEqual(TEXT("Iris stays bright"), MaterialRegion(TEXT("眼睛")), 4.f);
-    TestEqual(TEXT("Metal"), MaterialRegion(TEXT("腿饰金属")), 5.f);
+    TestTrue(TEXT("Local PNG accepted"), SafeFaceTextureName(TEXT("face.png")));
+    for (const TCHAR* Name : {TEXT("../face.png"), TEXT("..\\face.png"), TEXT("/face.png"), TEXT("C:face.png"), TEXT("face.jpg"), TEXT("")})
+        TestFalse(TEXT("Unsafe or unsupported texture name rejected"), SafeFaceTextureName(Name));
+    const FString Root = FPaths::ProjectSavedDir() / TEXT("Tests") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    IFileManager::Get().MakeDirectory(*Root, true);
+    const FString ModelPath = Root / TEXT("fixture.pmx");
+    TArray<uint8> ModelBytes{1, 2, 3};
+    FFileHelper::SaveArrayToFile(ModelBytes, *ModelPath);
+    FSHAHash Hash;
+    FSHA1::HashBuffer(ModelBytes.GetData(), ModelBytes.Num(), Hash.Hash);
+    auto* Asset = NewObject<UVrmAssetListObject>();
+    Asset->SkeletalMesh = NewObject<USkeletalMesh>();
+    Asset->SkeletalMesh->GetMaterials().Add(FSkeletalMaterial(nullptr, true, false, TEXT("Face")));
+    TArray<FColor> Pixels{FColor(128, 128, 255, 255)};
+    TArray<uint8> Png;
+    FImageUtils::ThumbnailCompressImageArray(1, 1, Pixels, Png);
+    FFileHelper::SaveArrayToFile(Png, *(Root / TEXT("face.png")));
+    const FString Valid = FString::Printf(TEXT("{\"version\":1,\"source_sha1\":\"%s\",\"materials\":[{\"index\":0,\"name\":\"Face\",\"texture\":\"face.png\"}]}"), *Hash.ToString().ToLower());
+    FFileHelper::SaveStringToFile(Valid, *(ModelPath + TEXT(".toon.json")));
+    TestEqual(TEXT("Matching profile loads"), LoadFaceMaps(ModelPath, Asset).Num(), 1);
+    FFileHelper::SaveStringToFile(Valid.Replace(TEXT("\"Face\""), TEXT("\"Other\"")), *(ModelPath + TEXT(".toon.json")));
+    TestEqual(TEXT("Wrong slot name falls back"), LoadFaceMaps(ModelPath, Asset).Num(), 0);
+    FFileHelper::SaveStringToFile(Valid.Replace(TEXT("face.png"), TEXT("../face.png")), *(ModelPath + TEXT(".toon.json")));
+    TestEqual(TEXT("Traversal falls back"), LoadFaceMaps(ModelPath, Asset).Num(), 0);
+    FFileHelper::SaveStringToFile(Valid.Replace(*Hash.ToString().ToLower(), TEXT("wrong")), *(ModelPath + TEXT(".toon.json")));
+    TestEqual(TEXT("Different source model falls back"), LoadFaceMaps(ModelPath, Asset).Num(), 0);
+    for (const FString& Path : {ModelPath, ModelPath + TEXT(".toon.json"), Root / TEXT("face.png")}) IFileManager::Get().Delete(*Path);
+    IFileManager::Get().DeleteDirectory(*Root);
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdMaterialsTest, "HonkaiRendering.Rendering.SharedMaterials",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMmdMaterialsTest::RunTest(const FString& Parameters)
+{
+    for (const TCHAR* Path : {TEXT("/Game/MmdViewer/M_Toon"), TEXT("/Game/MmdViewer/M_ToonTwoSided")})
+    {
+        auto* Material = LoadObject<UMaterial>(nullptr, Path);
+        if (!TestNotNull(TEXT("Shared surface material exists"), Material)) return false;
+        TestTrue(TEXT("Surface receives real lighting and shadows"), Material->GetShadingModels().HasShadingModel(MSM_DefaultLit));
+        TestTrue(TEXT("Source cutout alpha is retained"), Material->GetBlendMode() == BLEND_Masked);
+    }
+    auto* Cel = LoadObject<UMaterial>(nullptr, TEXT("/Game/MmdViewer/M_CelLighting"));
+    if (!TestNotNull(TEXT("Cel pass exists"), Cel)) return false;
+    TestTrue(TEXT("Cel pass uses scene lighting"), Cel->MaterialDomain == MD_PostProcess);
+    TestTrue(TEXT("GBuffer sampling precedes temporal upscaling"), Cel->BlendableLocation == BL_SceneColorBeforeDOF);
+    for (const TCHAR* Path : {TEXT("/Game/MmdViewer/M_Outline"), TEXT("/Game/MmdViewer/M_FaceOutline")})
+    {
+        auto* Material = LoadObject<UMaterial>(nullptr, Path);
+        if (!TestNotNull(TEXT("Outline material exists"), Material)) return false;
+        TestTrue(TEXT("Outline retains backface masking"), Material->IsTwoSided() && Material->GetBlendMode() == BLEND_Masked);
+    }
     return true;
 }
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdOverlayTest, "HonkaiRendering.UI.InViewportMenu",
@@ -299,6 +406,7 @@ void AMmdViewerController::BeginPlay()
 	ToonMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_Toon.M_Toon"));
 	ToonTwoSidedMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_ToonTwoSided.M_ToonTwoSided"));
 	OutlineMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_Outline.M_Outline"));
+	FaceOutlineMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_FaceOutline.M_FaceOutline"));
 	TranslucentMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_ToonTranslucent.M_ToonTranslucent"));
 	TranslucentTwoSidedMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_ToonTranslucentTwoSided.M_ToonTranslucentTwoSided"));
     ImportTemplate = NewObject<UVrmAssetListObject>(this);
@@ -316,7 +424,36 @@ void AMmdViewerController::BeginPlay()
     C->PostProcessSettings.bOverride_LocalExposureShadowContrastScale = true; C->PostProcessSettings.LocalExposureShadowContrastScale = 1;
     C->PostProcessSettings.bOverride_BloomIntensity = true; C->PostProcessSettings.BloomIntensity = 0.08f;
 	C->PostProcessSettings.bOverride_VignetteIntensity = true; C->PostProcessSettings.VignetteIntensity = 0;
-	UpdateCamera();
+    C->PostProcessSettings.bOverride_AmbientOcclusionIntensity = true; C->PostProcessSettings.AmbientOcclusionIntensity = 0;
+    C->PostProcessSettings.bOverride_DynamicGlobalIlluminationMethod = true;
+    C->PostProcessSettings.DynamicGlobalIlluminationMethod = EDynamicGlobalIlluminationMethod::None;
+    C->PostProcessSettings.bOverride_ReflectionMethod = true;
+    C->PostProcessSettings.ReflectionMethod = EReflectionMethod::None;
+    auto* Key = GetWorld()->SpawnActor<ADirectionalLight>();
+    auto* Light = CastChecked<UDirectionalLightComponent>(Key->GetLightComponent());
+    Light->SetMobility(EComponentMobility::Movable);
+    Light->SetIntensity(3.141593f);
+    Light->SetLightColor(FLinearColor::White);
+    Light->SetIndirectLightingIntensity(0);
+    Light->SetVolumetricScatteringIntensity(0);
+    Light->SetLightSourceAngle(0.5f);
+    Light->SetShadowBias(0.3f);
+    Light->SetShadowSlopeBias(0.3f);
+    float LightYaw = -25.f;
+    FParse::Value(FCommandLine::Get(), TEXT("MmdLightYaw="), LightYaw);
+    Key->SetActorRotation(FRotator(-25.f, LightYaw + 180.f, 0));
+    KeyDirection = -Key->GetActorForwardVector();
+    if (!FParse::Param(FCommandLine::Get(), TEXT("MmdBaseColor")))
+    {
+        auto* Cel = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_CelLighting"));
+        if (Cel)
+        {
+            auto* Pass = UMaterialInstanceDynamic::Create(Cel, C);
+            Pass->SetVectorParameterValue(TEXT("LightDirection"), FLinearColor(-Key->GetActorForwardVector()));
+            C->PostProcessSettings.AddBlendable(Pass, 1.f);
+        }
+    }
+    UpdateCamera();
 	Widget = SNew(SMmdViewer, this); GEngine->GameViewport->AddViewportWidgetContent(Widget.ToSharedRef());
 	FInputModeUIOnly Input; Input.SetWidgetToFocus(Widget); Input.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock); SetInputMode(Input);
 	FString AutoImport;
@@ -415,18 +552,20 @@ void AMmdViewerController::OnModelLoaded()
 {
     bBusy = false;
     if (!PendingAsset || !PendingAsset->SkeletalMesh) { Status = TEXT("VRM4U 无法读取此 PMX，详见输出日志。"); UE_LOG(LogTemp, Error, TEXT("MMD_LOAD_FAILED %s"), *PendingPath); Widget->OpenPage("Status"); return; }
-    if (!ToonMaterial || !ToonTwoSidedMaterial || !TranslucentMaterial || !TranslucentTwoSidedMaterial || !OutlineMaterial) { Status = TEXT("缺少卡通材质，请运行 Scripts/setup_viewer.py。"); PendingAsset = nullptr; Widget->OpenPage("Status"); return; }
+    if (!ToonMaterial || !ToonTwoSidedMaterial || !TranslucentMaterial || !TranslucentTwoSidedMaterial || !OutlineMaterial || !FaceOutlineMaterial) { Status = TEXT("缺少卡通材质，请运行 Scripts/setup_viewer.py。"); PendingAsset = nullptr; Widget->OpenPage("Status"); return; }
     PendingAsset->SkeletalMesh->CalculateExtendedBounds();
     // The plugin leaves PMX textures in CPU memory for the runtime caller to upload.
     for (UTexture2D* Texture : PendingAsset->Textures) if (Texture && !Texture->GetResource()) Texture->UpdateResource();
     auto* NewActor = GetWorld()->SpawnActor<AActor>();
     auto* Mesh = NewObject<USkeletalMeshComponent>(NewActor); NewActor->SetRootComponent(Mesh); Mesh->RegisterComponent();
-    Mesh->SetSkeletalMesh(PendingAsset->SkeletalMesh); Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision); Mesh->SetSimulatePhysics(false); Mesh->SetCastShadow(false);
+    Mesh->SetSkeletalMesh(PendingAsset->SkeletalMesh); Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision); Mesh->SetSimulatePhysics(false); Mesh->SetCastShadow(true);
+    Mesh->SetRenderCustomDepth(true); Mesh->SetCustomDepthStencilValue(1);
     Mesh->bPauseAnims = true;
     auto* Outline = NewObject<USkeletalMeshComponent>(NewActor);
     Outline->SetupAttachment(Mesh); Outline->RegisterComponent(); Outline->SetSkeletalMesh(PendingAsset->SkeletalMesh);
     Outline->SetCollisionEnabled(ECollisionEnabled::NoCollision); Outline->SetCastShadow(false); Outline->bPauseAnims = true;
     const bool bBaseColorOnly = FParse::Param(FCommandLine::Get(), TEXT("MmdBaseColor"));
+    const auto FaceMaps = LoadFaceMaps(ImportDirectory / PendingPath, PendingAsset);
     Outline->SetVisibility(!bBaseColorOnly);
     int32 Missing = 0;
     for (int32 I = 0; I < Mesh->GetNumMaterials(); ++I)
@@ -446,9 +585,21 @@ void AMmdViewerController::OnModelLoaded()
         auto* Mat = UMaterialInstanceDynamic::Create(Parent, Mesh);
         Mat->SetScalarParameterValue(TEXT("ToonStrength"), bBaseColorOnly ? 0.f : 1.f);
         Mat->SetVectorParameterValue(TEXT("Tint"), Tint); Mat->SetScalarParameterValue(TEXT("Opacity"), Tint.A);
+        Mat->SetVectorParameterValue(TEXT("LightDirection"), FLinearColor(KeyDirection));
+        if (auto* const* Face = FaceMaps.Find(I))
+        {
+            Mat->SetTextureParameterValue(TEXT("FaceMap"), *Face);
+            Mat->SetScalarParameterValue(TEXT("FaceEnabled"), bBaseColorOnly ? 0.f : 1.f);
+        }
+        UTexture* SphereTexture = nullptr;
+        float SphereMode = 0;
+        if (Source && Source->GetTextureParameterValue(TEXT("mmd_SphereTexture"), SphereTexture) && SphereTexture)
+        {
+            Source->GetScalarParameterValue(TEXT("mmd_SphereMode"), SphereMode);
+            Mat->SetTextureParameterValue(TEXT("SphereTexture"), SphereTexture);
+            Mat->SetScalarParameterValue(TEXT("SphereMode"), SphereMode);
+        }
         const FString SlotName = PendingAsset->SkeletalMesh->GetMaterials()[I].MaterialSlotName.ToString();
-        const float Region = MaterialRegion(SlotName);
-        Mat->SetScalarParameterValue(TEXT("Region"), Region);
         if (Texture) Mat->SetTextureParameterValue(TEXT("BaseTexture"), Texture); else ++Missing;
         float EdgeEnabled = 0.f, EdgeSize = 0.f;
         FLinearColor EdgeColor = FLinearColor::Black;
@@ -458,12 +609,17 @@ void AMmdViewerController::OnModelLoaded()
             Source->GetScalarParameterValue(TEXT("mmd_EdgeSize"), EdgeSize);
             Source->GetVectorParameterValue(TEXT("mmd_EdgeColor"), EdgeColor);
         }
-        UE_LOG(LogTemp, Display, TEXT("MMD_MATERIAL slot=%s texture=%s tint=%s translucent=%d two_sided=%d edge=%.0f edge_size=%.3f region=%.0f"), *SlotName, *GetNameSafe(Texture), *Tint.ToString(), Transparent, TwoSided, EdgeEnabled, EdgeSize, Region);
+        UE_LOG(LogTemp, Display, TEXT("MMD_MATERIAL slot=%s texture=%s tint=%s translucent=%d two_sided=%d edge=%.0f edge_size=%.3f sphere=%.0f"), *SlotName, *GetNameSafe(Texture), *Tint.ToString(), Transparent, TwoSided, EdgeEnabled, EdgeSize, SphereMode);
         Mesh->SetMaterial(I, Mat);
-        auto* Ink = UMaterialInstanceDynamic::Create(OutlineMaterial, Outline);
+        auto* Ink = UMaterialInstanceDynamic::Create(FaceMaps.Contains(I) ? FaceOutlineMaterial : OutlineMaterial, Outline);
+        Ink->SetVectorParameterValue(TEXT("SurfaceTint"), Tint);
         Ink->SetVectorParameterValue(TEXT("Tint"), EdgeColor);
         Ink->SetScalarParameterValue(TEXT("Opacity"), Transparent || EdgeEnabled < 0.5f ? 0.f : Tint.A * EdgeColor.A);
-        Ink->SetScalarParameterValue(TEXT("OutlineWidth"), EdgeSize * (Region == 1 ? 0.035f : (Region == 2 ? 0.07f : 0.11f)));
+        Ink->SetScalarParameterValue(TEXT("OutlineWidth"), EdgeSize * (FaceMaps.Contains(I) ? 0.07f : 0.16f));
+        if (auto* const* Face = FaceMaps.Find(I))
+        {
+            Ink->SetTextureParameterValue(TEXT("FaceMap"), *Face);
+        }
         if (Texture) Ink->SetTextureParameterValue(TEXT("BaseTexture"), Texture);
         Outline->SetMaterial(I, Ink);
     }
@@ -496,7 +652,15 @@ void AMmdViewerController::OnModelLoaded()
         for (const auto& Section : Render->LODRenderData[0].RenderSections) Triangles += Section.NumTriangles;
     }
     ModelInfo = FString::Printf(TEXT("%s 个顶点\n%s 个三角形\n%d 个材质\n\nVRM4U"), *FText::AsNumber(Vertices).ToString(), *FText::AsNumber(Triangles).ToString(), Mesh->GetNumMaterials());
-    Rotation = FRotator(-5, 180, 0); FocusModel();
+    Rotation = FRotator(-5, 180, 0);
+    FParse::Value(FCommandLine::Get(), TEXT("MmdViewYaw="), Rotation.Yaw);
+    FocusModel();
+    float FrameScale = 1.f, TargetHeight = 1.f;
+    FParse::Value(FCommandLine::Get(), TEXT("MmdFrameScale="), FrameScale);
+    FParse::Value(FCommandLine::Get(), TEXT("MmdTargetHeight="), TargetHeight);
+    Distance *= FMath::Clamp(FrameScale, 0.1f, 2.f);
+    Target.Z = ModelCenter.Z * FMath::Clamp(TargetHeight, 0.f, 2.f);
+    UpdateCamera();
     Status = Missing ? FString::Printf(TEXT("已加载。%d 个材质未匹配到基础贴图，使用材质颜色。"), Missing) : TEXT("已加载。中键旋转，Shift + 中键平移，滚轮缩放。");
     UE_LOG(LogTemp, Display, TEXT("MMD_LOADED plugin=VRM4U name=%s vertices=%d triangles=%d missing=%d textures=%d"), *ModelName, Vertices, Triangles, Missing, LoadedAsset->Textures.Num());
     Widget->CloseWindow();
