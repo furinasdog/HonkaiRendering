@@ -1,0 +1,40 @@
+# Unreal-generated files
+/Binaries/
+/Intermediate/
+/Saved/
+/DerivedDataCache/
+/.vs/
+/.vscode/
+*.sln
+*.slnx
+*.suo
+*.opensdf
+*.VC.db
+*.VC.opendb
+
+# Local agent, MCP and IDE settings
+/.codex/
+/.cursor/
+/.gemini/
+/.agents/
+/.mcp.json
+/.vsconfig
+/Config/DefaultEditorPerProjectUserSettings.ini
+.env
+.env.*
+__pycache__/
+*.pyc
+
+# Keep only original viewer assets; template/demo and user media stay local.
+/Content/*
+!/Content/MmdViewer/
+*.pmx
+*.pmd
+*.vmd
+*.zip
+*.7z
+*.rar
+
+# Plugins are managed as explicit submodules.
+/Plugins/*
+!/Plugins/VRM4U/

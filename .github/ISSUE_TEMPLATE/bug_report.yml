@@ -1,0 +1,15 @@
+name: Bug report
+description: Report a reproducible import, rendering or viewer problem.
+body:
+  - type: textarea
+    attributes:
+      label: Environment and commit
+      description: Include the UE version, Windows version, project commit and submodule commit.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps, expected result and actual result
+      description: Include the relevant error or a small screenshot. Do not upload private logs or models you cannot redistribute.
+    validations:
+      required: true
