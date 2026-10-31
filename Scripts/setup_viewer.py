@@ -44,7 +44,17 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
         connect(opacity, "", alpha, "B")
         output(alpha, "", u.MaterialProperty.MP_OPACITY if translucent else u.MaterialProperty.MP_OPACITY_MASK)
         if outline:
-            output(tint, "RGB", u.MaterialProperty.MP_EMISSIVE_COLOR)
+            ink = node(u.MaterialExpressionCustom, output_type=u.CustomMaterialOutputType.CMOT_FLOAT3,
+                       code="return max(Ink, Base * float3(0.16, 0.09, 0.12));")
+            ink_inputs = []
+            for input_name in ("Ink", "Base"):
+                i = u.CustomInput()
+                i.set_editor_property("input_name", input_name)
+                ink_inputs.append(i)
+            ink.set_editor_property("inputs", ink_inputs)
+            connect(tint, "RGB", ink, "Ink")
+            connect(texture, "RGB", ink, "Base")
+            output(ink, "", u.MaterialProperty.MP_EMISSIVE_COLOR)
             normal = node(u.MaterialExpressionVertexNormalWS)
             width = node(u.MaterialExpressionScalarParameter, parameter_name="OutlineWidth", default_value=0.12)
             offset = node(u.MaterialExpressionMultiply)
@@ -68,7 +78,7 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
             shader = node(u.MaterialExpressionCustom, output_type=u.CustomMaterialOutputType.CMOT_FLOAT3)
             shader.set_editor_property("code", Path(__file__).with_name("HonkaiToon.hlsl").read_text(encoding="utf-8"))
             inputs = []
-            for input_name in ("N", "V", "Base", "Tint", "Region", "LightDirection", "ToonStrength"):
+            for input_name in ("N", "V", "Base", "Tint", "Region", "LightDirection", "ToonStrength", "W", "Center", "Extent"):
                 i = u.CustomInput()
                 i.set_editor_property("input_name", input_name)
                 inputs.append(i)
@@ -76,11 +86,14 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
             for source, pin, target in ((normal, "", "N"), (view, "", "V"), (texture, "RGB", "Base"), (tint, "RGB", "Tint")):
                 connect(source, pin, shader, target)
             region = node(u.MaterialExpressionScalarParameter, parameter_name="Region", default_value=0)
-            light = node(u.MaterialExpressionVectorParameter, parameter_name="LightDirection", default_value=u.LinearColor(0.65, -0.3, 0.7, 0))
+            light = node(u.MaterialExpressionVectorParameter, parameter_name="LightDirection", default_value=u.LinearColor(0.45, -0.6, 0.66, 0))
             connect(region, "", shader, "Region")
             connect(light, "RGB", shader, "LightDirection")
             strength = node(u.MaterialExpressionScalarParameter, parameter_name="ToonStrength", default_value=1)
             connect(strength, "", shader, "ToonStrength")
+            connect(node(u.MaterialExpressionWorldPosition), "XYZ", shader, "W")
+            connect(node(u.MaterialExpressionObjectPositionWS), "", shader, "Center")
+            connect(node(u.MaterialExpressionObjectBounds), "", shader, "Extent")
             output(shader, "", u.MaterialProperty.MP_EMISSIVE_COLOR)
     lib.layout_material_expressions(m)
     errors = lib.recompile_material(m)

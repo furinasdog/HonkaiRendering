@@ -26,7 +26,11 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
-#include "Widgets/SWindow.h"
+#include "Widgets/SOverlay.h"
+#include "Animation/CurveSequence.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#endif
 #include "Input/DragAndDrop.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
@@ -46,6 +50,16 @@ namespace
 	{
 		return SNew(STextBlock).Text(FText::FromString(Value)).Font(FCoreStyle::GetDefaultFontStyle("Regular", Size)).ColorAndOpacity(Color);
 	}
+    float MaterialRegion(const FString& Name)
+    {
+    float Region = 0;
+    if (Name.Contains(TEXT("顏")) || Name.Contains(TEXT("顔")) || Name.Contains(TEXT("颜")) || Name.Contains(TEXT("脸")) || Name.Contains(TEXT("face"), ESearchCase::IgnoreCase)) Region = 1;
+    else if (Name.Contains(TEXT("髪")) || Name.Contains(TEXT("头发")) || Name.Contains(TEXT("hair"), ESearchCase::IgnoreCase)) Region = 2;
+    else if (Name.Contains(TEXT("肌")) || Name.Contains(TEXT("皮肤")) || Name == TEXT("手") || Name == TEXT("足2") || Name.Contains(TEXT("skin"), ESearchCase::IgnoreCase)) Region = 3;
+    else if (Name.Contains(TEXT("目")) || Name.Contains(TEXT("眼")) || Name.Contains(TEXT("eye"), ESearchCase::IgnoreCase)) Region = 4;
+    else if (Name.Contains(TEXT("金")) || Name.Contains(TEXT("metal"), ESearchCase::IgnoreCase)) Region = 5;
+        return Region;
+    }
 }
 
 class SMmdMenu : public SCompoundWidget
@@ -71,7 +85,9 @@ class SMmdViewer : public SCompoundWidget
 public:
     SLATE_BEGIN_ARGS(SMmdViewer) {} SLATE_END_ARGS()
     TWeakObjectPtr<AMmdViewerController> Controller;
-    TSharedPtr<SWindow> MenuWindow;
+    TSharedPtr<SBorder> MenuLayer;
+    FCurveSequence MenuFade{0.f, 0.18f, ECurveEaseFunction::QuadInOut};
+    bool bMenuOpen = false;
     bool bDragging = false;
 
     void Construct(const FArguments&, AMmdViewerController* InController)
@@ -79,14 +95,31 @@ public:
         Controller = InController;
         ChildSlot
         [
-            SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-            .BorderBackgroundColor(FLinearColor::Transparent)
+            SNew(SOverlay)
+            + SOverlay::Slot()
+            [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+                .BorderBackgroundColor(FLinearColor::Transparent)]
+            + SOverlay::Slot()
+            [SAssignNew(MenuLayer, SBorder)
+                .BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+                .BorderBackgroundColor(FLinearColor(0.008f, 0.012f, 0.02f, 0.66f))
+                .HAlign(HAlign_Center).VAlign(VAlign_Center).Padding(24)
+                .Visibility(EVisibility::Collapsed)
+                .IsEnabled_Lambda([this] { return bMenuOpen; })]
         ];
     }
+    virtual void Tick(const FGeometry& Geometry, double Time, float Delta) override
+    {
+        SCompoundWidget::Tick(Geometry, Time, Delta);
+        MenuLayer->SetRenderOpacity(MenuFade.GetLerp());
+        MenuLayer->SetVisibility(IsMenuBlocking() ? EVisibility::Visible : EVisibility::Collapsed);
+    }
+    bool IsMenuBlocking() const { return bMenuOpen || !MenuFade.IsAtStart(); }
     void CloseWindow()
     {
-        if (MenuWindow) MenuWindow->RequestDestroyWindow();
-        MenuWindow.Reset();
+        bMenuOpen = false;
+        if (Controller.IsValid()) Controller->bChoosing = false;
+        MenuFade.PlayRelative(SharedThis(this), false);
         if (FSlateApplication::IsInitialized()) FSlateApplication::Get().SetKeyboardFocus(SharedThis(this));
     }
     TSharedRef<SButton> Button(const FString& Caption, TFunction<void()> Action)
@@ -142,30 +175,17 @@ public:
             Add(SNew(STextBlock).Text_Lambda([this] { return FText::FromString(Controller->Status); }).AutoWrapText(true).ColorAndOpacity(Text));
             if (!Controller->bBusy) Add(Button(TEXT("关闭"), [this] { CloseWindow(); }));
         }
+        Body->InsertSlot(0).AutoHeight().Padding(0, 0, 0, 20)[Label(Title, 20)];
         TWeakPtr<SMmdViewer> Weak = SharedThis(this);
         TSharedRef<SMmdMenu> Content = SNew(SMmdMenu, [Weak]
         {
-            if (auto Self = Weak.Pin()) { Self->Controller->bChoosing = false; Self->CloseWindow(); }
-        }, SNew(SBox).WidthOverride(410)
-        [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(Panel).Padding(24)[Body]]);
-        if (!MenuWindow)
-        {
-            MenuWindow = SNew(SWindow).Title(FText::FromString(Title)).SizingRule(ESizingRule::Autosized)
-                .SupportsMinimize(false).SupportsMaximize(false).AutoCenter(EAutoCenter::PreferredWorkArea);
-            MenuWindow->SetOnWindowClosed(FOnWindowClosed::CreateLambda([Weak](const TSharedRef<SWindow>& Closed)
-            {
-                if (auto Self = Weak.Pin(); Self && Self->MenuWindow == Closed)
-                {
-                    Self->MenuWindow.Reset(); Self->Controller->bChoosing = false;
-                    FSlateApplication::Get().SetKeyboardFocus(Self);
-                }
-            }));
-            MenuWindow->SetContent(Content);
-            auto Parent = FSlateApplication::Get().FindWidgetWindow(SharedThis(this));
-            if (Parent) FSlateApplication::Get().AddWindowAsNativeChild(MenuWindow.ToSharedRef(), Parent.ToSharedRef());
-            else FSlateApplication::Get().AddWindow(MenuWindow.ToSharedRef());
-        }
-        else { MenuWindow->SetTitle(FText::FromString(Title)); MenuWindow->SetContent(Content); }
+            if (auto Self = Weak.Pin()) Self->CloseWindow();
+        }, SNew(SBox).WidthOverride(380)
+        [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(Panel).Padding(28)[Body]]);
+        MenuLayer->SetContent(Content);
+        bDragging = false;
+        bMenuOpen = true;
+        MenuFade.PlayRelative(SharedThis(this), true);
         FSlateApplication::Get().SetKeyboardFocus(Content);
     }
     void RefreshChoices() { OpenPage("Choose"); }
@@ -189,7 +209,7 @@ public:
     }
     virtual FReply OnMouseButtonDown(const FGeometry&, const FPointerEvent& Event) override
     {
-        if (Event.GetEffectingButton() == EKeys::MiddleMouseButton && !MenuWindow)
+        if (Event.GetEffectingButton() == EKeys::MiddleMouseButton && !IsMenuBlocking())
         {
             bDragging = true;
             return FReply::Handled().CaptureMouse(SharedThis(this)).UseHighPrecisionMouseMovement(SharedThis(this)).SetUserFocus(SharedThis(this));
@@ -209,13 +229,13 @@ public:
     }
     virtual FReply OnMouseWheel(const FGeometry&, const FPointerEvent& Event) override
     {
-        if (!MenuWindow) Controller->Zoom(Event.GetWheelDelta());
+        if (!IsMenuBlocking()) Controller->Zoom(Event.GetWheelDelta());
         return FReply::Handled();
     }
     virtual FReply OnKeyDown(const FGeometry&, const FKeyEvent& Event) override
     {
-        if (Event.GetKey() == EKeys::Escape) { if (MenuWindow) CloseWindow(); else OpenPage(); return FReply::Handled(); }
-        if (MenuWindow) return FReply::Handled();
+        if (Event.GetKey() == EKeys::Escape) { if (bMenuOpen) CloseWindow(); else OpenPage(); return FReply::Handled(); }
+        if (IsMenuBlocking()) return FReply::Handled();
         if (Event.GetKey() == EKeys::NumPadOne) Controller->SetView(1, Event.IsControlDown());
         else if (Event.GetKey() == EKeys::NumPadThree) Controller->SetView(3, Event.IsControlDown());
         else if (Event.GetKey() == EKeys::NumPadSeven) Controller->SetView(7, Event.IsControlDown());
@@ -225,6 +245,48 @@ public:
         return FReply::Handled();
     }
 };
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdRegionTest, "HonkaiRendering.Rendering.MaterialRegions",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMmdRegionTest::RunTest(const FString& Parameters)
+{
+    TestEqual(TEXT("Face"), MaterialRegion(TEXT("顏+")), 1.f);
+    TestEqual(TEXT("Hair"), MaterialRegion(TEXT("短头发")), 2.f);
+    TestEqual(TEXT("Hair accessory stays fabric"), MaterialRegion(TEXT("发饰")), 0.f);
+    TestEqual(TEXT("Skin"), MaterialRegion(TEXT("皮肤")), 3.f);
+    TestEqual(TEXT("Bare hands"), MaterialRegion(TEXT("手")), 3.f);
+    TestEqual(TEXT("Gloves stay fabric"), MaterialRegion(TEXT("手套")), 0.f);
+    TestEqual(TEXT("Iris stays bright"), MaterialRegion(TEXT("眼睛")), 4.f);
+    TestEqual(TEXT("Metal"), MaterialRegion(TEXT("腿饰金属")), 5.f);
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdOverlayTest, "HonkaiRendering.UI.InViewportMenu",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMmdOverlayTest::RunTest(const FString& Parameters)
+{
+    const int32 Windows = FSlateApplication::Get().GetTopLevelWindows().Num();
+    auto Menu = SNew(SMmdViewer, nullptr);
+    TestFalse(TEXT("Menu starts hidden"), Menu->IsMenuBlocking());
+    Menu->OpenPage();
+    Menu->MenuFade.JumpToEnd();
+    Menu->Tick(FGeometry(), 0, 0);
+    TestTrue(TEXT("Open menu blocks camera input"), Menu->IsMenuBlocking());
+    TestTrue(TEXT("Overlay is visible"), Menu->MenuLayer->GetVisibility().IsVisible());
+    Menu->CloseWindow();
+    TestTrue(TEXT("Fade-out still blocks camera input"), Menu->IsMenuBlocking());
+    Menu->OpenPage();
+    TestTrue(TEXT("Reopening during fade-out works"), Menu->bMenuOpen);
+    Menu->CloseWindow();
+    Menu->MenuFade.JumpToStart();
+    Menu->MenuFade.Pause();
+    Menu->Tick(FGeometry(), 0, 0);
+    TestFalse(TEXT("Closed menu releases camera input"), Menu->IsMenuBlocking());
+    TestTrue(TEXT("Closed overlay collapses"), Menu->MenuLayer->GetVisibility() == EVisibility::Collapsed);
+    TestEqual(TEXT("No native window was created"), FSlateApplication::Get().GetTopLevelWindows().Num(), Windows);
+    return true;
+}
+#endif
 
 AMmdViewerGameMode::AMmdViewerGameMode()
 {
@@ -246,7 +308,13 @@ void AMmdViewerController::BeginPlay()
 	C->PostProcessSettings.bOverride_AutoExposureMethod = true; C->PostProcessSettings.AutoExposureMethod = AEM_Manual;
 	C->PostProcessSettings.bOverride_AutoExposureBias = true; C->PostProcessSettings.AutoExposureBias = 0;
 	C->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure = true; C->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure = false;
-	C->PostProcessSettings.bOverride_BloomIntensity = true; C->PostProcessSettings.BloomIntensity = 0.08f;
+	// Keep authored display colors instead of filmic grey whites and desaturated reds.
+    C->PostProcessSettings.bOverride_ToneCurveAmount = true; C->PostProcessSettings.ToneCurveAmount = 0;
+    C->PostProcessSettings.bOverride_ExpandGamut = true; C->PostProcessSettings.ExpandGamut = 0;
+    C->PostProcessSettings.bOverride_BlueCorrection = true; C->PostProcessSettings.BlueCorrection = 0;
+    C->PostProcessSettings.bOverride_LocalExposureHighlightContrastScale = true; C->PostProcessSettings.LocalExposureHighlightContrastScale = 1;
+    C->PostProcessSettings.bOverride_LocalExposureShadowContrastScale = true; C->PostProcessSettings.LocalExposureShadowContrastScale = 1;
+    C->PostProcessSettings.bOverride_BloomIntensity = true; C->PostProcessSettings.BloomIntensity = 0.08f;
 	C->PostProcessSettings.bOverride_VignetteIntensity = true; C->PostProcessSettings.VignetteIntensity = 0;
 	UpdateCamera();
 	Widget = SNew(SMmdViewer, this); GEngine->GameViewport->AddViewportWidgetContent(Widget.ToSharedRef());
@@ -378,11 +446,8 @@ void AMmdViewerController::OnModelLoaded()
         auto* Mat = UMaterialInstanceDynamic::Create(Parent, Mesh);
         Mat->SetScalarParameterValue(TEXT("ToonStrength"), bBaseColorOnly ? 0.f : 1.f);
         Mat->SetVectorParameterValue(TEXT("Tint"), Tint); Mat->SetScalarParameterValue(TEXT("Opacity"), Tint.A);
-        FString SlotName = PendingAsset->SkeletalMesh->GetMaterials()[I].MaterialSlotName.ToString() + (Texture ? Texture->GetName() : TEXT(""));
-        float Region = 0;
-        if (SlotName.Contains(TEXT("顏")) || SlotName.Contains(TEXT("顔")) || SlotName.Contains(TEXT("颜")) || SlotName.Contains(TEXT("脸")) || SlotName.Contains(TEXT("face"), ESearchCase::IgnoreCase)) Region = 1;
-        else if (SlotName.Contains(TEXT("髪")) || SlotName.Contains(TEXT("发")) || SlotName.Contains(TEXT("hair"), ESearchCase::IgnoreCase)) Region = 2;
-        else if (SlotName.Contains(TEXT("肌")) || SlotName.Contains(TEXT("skin"), ESearchCase::IgnoreCase)) Region = 3;
+        const FString SlotName = PendingAsset->SkeletalMesh->GetMaterials()[I].MaterialSlotName.ToString();
+        const float Region = MaterialRegion(SlotName);
         Mat->SetScalarParameterValue(TEXT("Region"), Region);
         if (Texture) Mat->SetTextureParameterValue(TEXT("BaseTexture"), Texture); else ++Missing;
         float EdgeEnabled = 0.f, EdgeSize = 0.f;
@@ -398,7 +463,7 @@ void AMmdViewerController::OnModelLoaded()
         auto* Ink = UMaterialInstanceDynamic::Create(OutlineMaterial, Outline);
         Ink->SetVectorParameterValue(TEXT("Tint"), EdgeColor);
         Ink->SetScalarParameterValue(TEXT("Opacity"), Transparent || EdgeEnabled < 0.5f ? 0.f : Tint.A * EdgeColor.A);
-        Ink->SetScalarParameterValue(TEXT("OutlineWidth"), EdgeSize * (Region == 1 ? 0.05f : 0.12f));
+        Ink->SetScalarParameterValue(TEXT("OutlineWidth"), EdgeSize * (Region == 1 ? 0.035f : (Region == 2 ? 0.07f : 0.11f)));
         if (Texture) Ink->SetTextureParameterValue(TEXT("BaseTexture"), Texture);
         Outline->SetMaterial(I, Ink);
     }

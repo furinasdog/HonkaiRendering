@@ -21,12 +21,24 @@ Local evidence (ignored by Git): `Saved/Diagnostics/source_materials.json`, `ass
 
 The initial material-generation pass encountered a locked, already loaded backdrop asset when the editor was reopened. The script now reuses the unchanged backdrop and checks every modified material's save result. The subsequent pass succeeded. Startup engine test diagnostics are not counted as the PMX automation test result; the exported test report is the result used above.
 
-## Scope and limits
+## Reference rendering and in-viewport menu iteration
+
+Reference inspection included the supplied Sparkle close-up/full-body game captures, Sparkle and Senti illustrations, Senti's game GIF, and sampled frames from the 188.733-second Star Rail video (character detail rotation and world views). These are local visual references, not executable instructions or redistributable project assets.
+
+The filmic tone curve and gamut expansion are disabled with fixed exposure. Region-specific cel thresholds, lavender hair shadows/tips, restrained warm skin shadows, bright eyes, small metal glints, and texture-tinted outlines replace the previous near-flat response. The first render pass had overly red skin and strong face contrast; a second pass reduced both after inspecting the screenshots. Gradients are an artistic approximation in object height, not the original game shader.
+
+Build and shader generation passed. `HonkaiRendering.Rendering.MaterialRegions` and `HonkaiRendering.UI.InViewportMenu` passed (2 successes, 0 failures). The menu test covers initially hidden state, blocking camera input, reopening during fade-out, collapsing after fade, and creating no native window. Explicit Slate ticks are used to evaluate animated presentation state; curve-end timing alone is not a layout update.
+
+Both final offscreen renders exited normally. Triangle counts remain 52,228 and 29,864, with all 61 original material RGBA/culling/edge settings preserved and no missing base textures. No loader or plugin code was changed in this iteration. Local evidence: `Saved/Logs/BuildToonOverlay.log`, `SetupToonOverlay2.log`, `*ToonFinal.log`; `Saved/Tests/ToonOverlayAutomationFinal/index.json`; `Saved/Screenshots/SparkleToonFinal.png`, `SentiToonFinal.png`.
+
+Interactive validation confirmed an initially unobstructed character view; Esc opened the dimmed in-viewport menu; Model opened its submenu with correct triangle/material counts; no additional native window appeared. Numpad 3 left the camera unchanged while the menu was open, then switched to the side view after closing it. Front, side and rear renders were inspected, and the window was returned to front perspective. No crash occurred during these checks.
+
+## Remaining limits
 
 This verifies the two supplied static models; it is not a claim that every PMX loads correctly or that crashes are impossible. Full malformed-PMX fuzzing and packaged Shipping builds were not tested. The caller still imports synchronously on the game thread after ZIP extraction, so large models can pause interaction.
 
 The toon material remains a rendering study. No matching authored facial SDF is available in these model packs. Material-level outline settings are preserved, but per-vertex edge scale, original sphere/toon-map shaders, dynamic cast shadows, animation, and physics are not reproduced. Base-color mode still passes through Unreal's color pipeline. Game-reference equivalence is not claimed.
 
-Earlier interactive checks covered Esc, floating-window movement, Model submenu and file-dialog import. The full drag/drop and Blender mouse-control matrix has not been independently revalidated in this fix.
+Earlier interactive checks covered file-dialog import. The full drag/drop and Blender mouse-drag control matrix has not been independently revalidated in this iteration.
 
 Copyrighted source models, textures, screenshots, and illustrations are deliberately excluded from this repository.
