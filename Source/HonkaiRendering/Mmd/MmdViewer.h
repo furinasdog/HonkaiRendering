@@ -8,6 +8,7 @@
 
 class UVrmAssetListObject;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class SMmdViewer;
 
 UCLASS()
@@ -43,6 +44,7 @@ private:
 	UPROPERTY() TObjectPtr<AActor> ModelActor;
 	UPROPERTY() TObjectPtr<ACameraActor> ViewerCamera;
 	UPROPERTY() TObjectPtr<UMaterialInterface> ToonMaterial;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> CelPass;
 	UPROPERTY() TObjectPtr<UMaterialInterface> ToonTwoSidedMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInterface> OutlineMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInterface> FaceOutlineMaterial;

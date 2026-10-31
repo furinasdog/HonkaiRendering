@@ -1,4 +1,20 @@
-# Local validation — 2026-10-31
+# Local validation
+
+## Color and shading follow-up — 2026-11-01
+
+The previous automatic pale-color lift also raised cool grey hair. A same-camera unlit diffuse audit isolated that from source colors: the affected grey-blue sample was `(225,225,227)` in the original texture/unlit capture and `(238,238,237)` in the previous shader. The revised shared curve preserves the darker grey-blue range while lifting the brighter near-white paint. Face highlight color is calibrated separately from its warm shadow, with dark markings retained. The same color-response functions apply to all models; there are no character-name or material-slot presets in the renderer.
+
+All four supplied PMX packages contain custom Toon textures. The Assimp fork now exposes their existing paths, and VRM4U decodes them through its existing image loader. The renderer packs the authored gradients into a 256-row sRGB atlas, using the otherwise-unused Material AO byte to select a row. Each supplied model loads two distinct ramps. Built-in toon indices, invalid/missing maps and more than 255 distinct ramps use a fallback. Explicitly disabled Toon slots instead preserve unshaded color and independent sphere effects. All 128 switches match the independent source records: 6, 6, 9 and 0 disabled slots respectively. These chiefly affect eyes and expression layers, not metal highlights. Geometry, parser, source RGBA and culling are unchanged.
+
+Face thresholds now come directly from the Blender-baked smooth coordinates. Re-interpolating masks by UV-space distance had distorted the boundary around eye holes and disconnected islands. The direct field follows a narrowing jaw, removing the isolated cheek patches. Face outline width increased from 0.07 to 0.12 times the source edge size, with a shared warm-brown response and the existing local nose control. A short screen-space contact term adds warm shadows only from nearby non-face surfaces. It cannot see off-screen occluders.
+
+Standard Bloom now has an HDR contribution from bright body paint and an explicit threshold. A broad HDR selection washed out white hair and was rejected. Final same-camera `SparkleDelivery` / `SparkleDeliveryBloomOff` captures show a subtle effect; temporal accumulation also contributes to pixel differences. Face shading does not emit additional HDR. Local color samples compare semantically similar areas, not identical UVs; pose, camera and lighting still differ from the official captures, so they are not a reference-equivalence score.
+
+Native build `BuildToonSwitch.log` passed with UE closed, including the rebuilt Assimp DLL. `DeliveryAutomation/index.json` records four passes plus one pass with the expected rejected-profile warning, zero failures. The new `ToonRamp` test checks shadow/light orientation, row isolation, missing input and invalid row rejection; the plugin test covers enabled, disabled and legacy-default Toon states. The complete Blender/MMD Tools authoring path passed in `FaceAuthoringDirect.log`; the coordinate field self-check also covers disconnected UV regions. Four-model checks continue to match all 128 source material records and original triangle counts. Final captures contain no failed material compilation, load failure or fatal error.
+
+Evidence remains local under `Saved`: `*AlbedoAudit.png`, `*StyleFinal.png`, `*Delivery.png`, `*DeliveryComparison.png`, the render logs and comparison manifests. User models, derived model maps, original reference media and comparison images are excluded from Git. Hair shadow shape and material-specific metal/fabric highlights still differ from the official game; color calibration alone cannot reconstruct missing art-directed LightMaps.
+
+## Earlier validation — 2026-10-31
 
 Environment: UE 5.8.4, Windows x64, D3D12/SM6, RTX 5070 Laptop GPU. Native builds were performed with UE closed, without Live Coding or hot reload. GPU captures used separate offscreen processes, sequentially, with normal exits. No `-ForceRes` was used in this iteration.
 

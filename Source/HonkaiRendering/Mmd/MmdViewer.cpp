@@ -55,6 +55,53 @@ namespace
 {
 	FLinearColor Panel(0.045f, 0.057f, 0.075f, 1), Text(0.82f, 0.86f, 0.91f, 1), Muted(0.43f, 0.51f, 0.61f, 1);
 
+    bool CopyToonRamp(UTexture2D* Texture, TArray<FColor>& Pixels, int32 Row)
+    {
+        auto* Data = Texture ? Texture->GetPlatformData() : nullptr;
+        if (!Data || Data->PixelFormat != PF_B8G8R8A8 || Data->Mips.IsEmpty()
+            || Row < 0 || Row >= 256 || Pixels.Num() != 256 * 256) return false;
+        auto& Mip = Data->Mips[0];
+        if (Mip.SizeX <= 0 || Mip.SizeY <= 0 || Mip.BulkData.GetBulkDataSize() < int64(Mip.SizeX) * Mip.SizeY * int64(sizeof(FColor))) return false;
+        const FColor* Source = static_cast<const FColor*>(Mip.BulkData.LockReadOnly());
+        if (!Source) { Mip.BulkData.Unlock(); return false; }
+        // PMX toon maps run from light at the top to shadow at the bottom.
+        for (int32 X = 0; X < 256; ++X)
+        {
+            const int32 Y = FMath::RoundToInt((255 - X) * (Mip.SizeY - 1) / 255.f);
+            Pixels[Row * 256 + X] = Source[Y * Mip.SizeX + Mip.SizeX / 2];
+        }
+        Mip.BulkData.Unlock();
+        return true;
+    }
+
+    UTexture2D* BuildToonAtlas(UVrmAssetListObject* Asset, TMap<UTexture*, uint8>& Rows)
+    {
+        TArray<FColor> Pixels;
+        Pixels.SetNumUninitialized(256 * 256);
+        for (int32 Y = 0; Y < 256; ++Y)
+            for (int32 X = 0; X < 256; ++X)
+                Pixels[Y * 256 + X] = FMath::Lerp(FLinearColor(0.64f, 0.52f, 0.61f), FLinearColor::White, X / 255.f).ToFColorSRGB();
+        for (const auto& Slot : Asset->SkeletalMesh->GetMaterials())
+        {
+            UTexture* Texture = nullptr;
+            if (!Slot.MaterialInterface || !Slot.MaterialInterface->GetTextureParameterValue(TEXT("mmd_ToonTexture"), Texture)
+                || Rows.Contains(Texture) || Rows.Num() >= 255) continue;
+            const uint8 Row = uint8(Rows.Num() + 1);
+            if (CopyToonRamp(Cast<UTexture2D>(Texture), Pixels, Row)) Rows.Add(Texture, Row);
+        }
+        auto* Atlas = UTexture2D::CreateTransient(256, 256, PF_B8G8R8A8);
+        if (!Atlas) return nullptr;
+        Atlas->SRGB = true;
+        Atlas->Filter = TF_Bilinear;
+        Atlas->AddressX = Atlas->AddressY = TA_Clamp;
+        auto& Bulk = Atlas->GetPlatformData()->Mips[0].BulkData;
+        FMemory::Memcpy(Bulk.Lock(LOCK_READ_WRITE), Pixels.GetData(), Pixels.Num() * sizeof(FColor));
+        Bulk.Unlock();
+        Asset->Textures.Add(Atlas);
+        UE_LOG(LogTemp, Display, TEXT("MMD_TOON_RAMPS count=%d"), Rows.Num());
+        return Atlas;
+    }
+
     bool SafeFaceTextureName(const FString& Name)
     {
         return !Name.IsEmpty() && Name == FPaths::GetCleanFilename(Name)
@@ -311,6 +358,26 @@ public:
 };
 
 #if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdToonRampTest, "HonkaiRendering.Rendering.ToonRamp",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMmdToonRampTest::RunTest(const FString& Parameters)
+{
+    auto* Texture = UTexture2D::CreateTransient(1, 2, PF_B8G8R8A8);
+    auto& Bulk = Texture->GetPlatformData()->Mips[0].BulkData;
+    auto* Source = static_cast<FColor*>(Bulk.Lock(LOCK_READ_WRITE));
+    Source[0] = FColor::White;
+    Source[1] = FColor(180, 160, 200);
+    Bulk.Unlock();
+    TArray<FColor> Pixels;
+    Pixels.Init(FColor::Black, 256 * 256);
+    TestTrue(TEXT("Valid PMX gradient copies"), CopyToonRamp(Texture, Pixels, 1));
+    TestEqual(TEXT("Shadow starts the row"), Pixels[256], FColor(180, 160, 200));
+    TestEqual(TEXT("Light ends the row"), Pixels[511], FColor::White);
+    TestEqual(TEXT("Other rows unchanged"), Pixels[255], FColor::Black);
+    TestFalse(TEXT("Missing source falls back"), CopyToonRamp(nullptr, Pixels, 1));
+    TestFalse(TEXT("Out of bounds row rejected"), CopyToonRamp(Texture, Pixels, 256));
+    return true;
+}
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdFaceProfileTest, "HonkaiRendering.Rendering.FaceProfile",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FMmdFaceProfileTest::RunTest(const FString& Parameters)
@@ -422,7 +489,8 @@ void AMmdViewerController::BeginPlay()
     C->PostProcessSettings.bOverride_BlueCorrection = true; C->PostProcessSettings.BlueCorrection = 0;
     C->PostProcessSettings.bOverride_LocalExposureHighlightContrastScale = true; C->PostProcessSettings.LocalExposureHighlightContrastScale = 1;
     C->PostProcessSettings.bOverride_LocalExposureShadowContrastScale = true; C->PostProcessSettings.LocalExposureShadowContrastScale = 1;
-    C->PostProcessSettings.bOverride_BloomIntensity = true; C->PostProcessSettings.BloomIntensity = 0.08f;
+    C->PostProcessSettings.bOverride_BloomIntensity = true; C->PostProcessSettings.BloomIntensity = 1.f;
+    C->PostProcessSettings.bOverride_BloomThreshold = true; C->PostProcessSettings.BloomThreshold = 0.85f;
 	C->PostProcessSettings.bOverride_VignetteIntensity = true; C->PostProcessSettings.VignetteIntensity = 0;
     C->PostProcessSettings.bOverride_AmbientOcclusionIntensity = true; C->PostProcessSettings.AmbientOcclusionIntensity = 0;
     C->PostProcessSettings.bOverride_DynamicGlobalIlluminationMethod = true;
@@ -436,21 +504,21 @@ void AMmdViewerController::BeginPlay()
     Light->SetLightColor(FLinearColor::White);
     Light->SetIndirectLightingIntensity(0);
     Light->SetVolumetricScatteringIntensity(0);
-    Light->SetLightSourceAngle(0.5f);
+    Light->SetLightSourceAngle(2.f);
     Light->SetShadowBias(0.3f);
     Light->SetShadowSlopeBias(0.3f);
-    float LightYaw = -25.f;
+    float LightYaw = 10.f;
     FParse::Value(FCommandLine::Get(), TEXT("MmdLightYaw="), LightYaw);
-    Key->SetActorRotation(FRotator(-25.f, LightYaw + 180.f, 0));
+    Key->SetActorRotation(FRotator(-45.f, LightYaw + 180.f, 0));
     KeyDirection = -Key->GetActorForwardVector();
     if (!FParse::Param(FCommandLine::Get(), TEXT("MmdBaseColor")))
     {
         auto* Cel = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_CelLighting"));
         if (Cel)
         {
-            auto* Pass = UMaterialInstanceDynamic::Create(Cel, C);
-            Pass->SetVectorParameterValue(TEXT("LightDirection"), FLinearColor(-Key->GetActorForwardVector()));
-            C->PostProcessSettings.AddBlendable(Pass, 1.f);
+            CelPass = UMaterialInstanceDynamic::Create(Cel, C);
+            CelPass->SetVectorParameterValue(TEXT("LightDirection"), FLinearColor(-Key->GetActorForwardVector()));
+            C->PostProcessSettings.AddBlendable(CelPass, 1.f);
         }
     }
     UpdateCamera();
@@ -554,6 +622,9 @@ void AMmdViewerController::OnModelLoaded()
     if (!PendingAsset || !PendingAsset->SkeletalMesh) { Status = TEXT("VRM4U 无法读取此 PMX，详见输出日志。"); UE_LOG(LogTemp, Error, TEXT("MMD_LOAD_FAILED %s"), *PendingPath); Widget->OpenPage("Status"); return; }
     if (!ToonMaterial || !ToonTwoSidedMaterial || !TranslucentMaterial || !TranslucentTwoSidedMaterial || !OutlineMaterial || !FaceOutlineMaterial) { Status = TEXT("缺少卡通材质，请运行 Scripts/setup_viewer.py。"); PendingAsset = nullptr; Widget->OpenPage("Status"); return; }
     PendingAsset->SkeletalMesh->CalculateExtendedBounds();
+    TMap<UTexture*, uint8> RampRows;
+    if (auto* Atlas = BuildToonAtlas(PendingAsset, RampRows); Atlas && CelPass)
+        CelPass->SetTextureParameterValue(TEXT("ToonAtlas"), Atlas);
     // The plugin leaves PMX textures in CPU memory for the runtime caller to upload.
     for (UTexture2D* Texture : PendingAsset->Textures) if (Texture && !Texture->GetResource()) Texture->UpdateResource();
     auto* NewActor = GetWorld()->SpawnActor<AActor>();
@@ -583,9 +654,22 @@ void AMmdViewerController::OnModelLoaded()
             ? (TwoSided ? TranslucentTwoSidedMaterial : TranslucentMaterial)
             : (TwoSided ? ToonTwoSidedMaterial : ToonMaterial);
         auto* Mat = UMaterialInstanceDynamic::Create(Parent, Mesh);
-        Mat->SetScalarParameterValue(TEXT("ToonStrength"), bBaseColorOnly ? 0.f : 1.f);
+        float ToonEnabled = 1.f;
+        if (Source) Source->GetScalarParameterValue(TEXT("mmd_ToonEnabled"), ToonEnabled);
+        Mat->SetScalarParameterValue(TEXT("ToonStrength"), bBaseColorOnly ? 0.f : ToonEnabled);
+        Mat->SetScalarParameterValue(TEXT("SphereStrength"), bBaseColorOnly ? 0.f : 1.f);
         Mat->SetVectorParameterValue(TEXT("Tint"), Tint); Mat->SetScalarParameterValue(TEXT("Opacity"), Tint.A);
         Mat->SetVectorParameterValue(TEXT("LightDirection"), FLinearColor(KeyDirection));
+        UTexture* ToonTexture = nullptr;
+        if (Source && Source->GetTextureParameterValue(TEXT("mmd_ToonTexture"), ToonTexture))
+        {
+            if (const uint8* Row = RampRows.Find(ToonTexture))
+            {
+                Mat->SetScalarParameterValue(TEXT("RampRow"), *Row / 255.f);
+                Mat->SetTextureParameterValue(TEXT("ToonRamp"), ToonTexture);
+                Mat->SetScalarParameterValue(TEXT("ToonRampEnabled"), 1.f);
+            }
+        }
         if (auto* const* Face = FaceMaps.Find(I))
         {
             Mat->SetTextureParameterValue(TEXT("FaceMap"), *Face);
@@ -609,13 +693,13 @@ void AMmdViewerController::OnModelLoaded()
             Source->GetScalarParameterValue(TEXT("mmd_EdgeSize"), EdgeSize);
             Source->GetVectorParameterValue(TEXT("mmd_EdgeColor"), EdgeColor);
         }
-        UE_LOG(LogTemp, Display, TEXT("MMD_MATERIAL slot=%s texture=%s tint=%s translucent=%d two_sided=%d edge=%.0f edge_size=%.3f sphere=%.0f"), *SlotName, *GetNameSafe(Texture), *Tint.ToString(), Transparent, TwoSided, EdgeEnabled, EdgeSize, SphereMode);
+        UE_LOG(LogTemp, Display, TEXT("MMD_MATERIAL slot=%s texture=%s tint=%s translucent=%d two_sided=%d edge=%.0f edge_size=%.3f sphere=%.0f toon=%.0f"), *SlotName, *GetNameSafe(Texture), *Tint.ToString(), Transparent, TwoSided, EdgeEnabled, EdgeSize, SphereMode, ToonEnabled);
         Mesh->SetMaterial(I, Mat);
         auto* Ink = UMaterialInstanceDynamic::Create(FaceMaps.Contains(I) ? FaceOutlineMaterial : OutlineMaterial, Outline);
         Ink->SetVectorParameterValue(TEXT("SurfaceTint"), Tint);
         Ink->SetVectorParameterValue(TEXT("Tint"), EdgeColor);
         Ink->SetScalarParameterValue(TEXT("Opacity"), Transparent || EdgeEnabled < 0.5f ? 0.f : Tint.A * EdgeColor.A);
-        Ink->SetScalarParameterValue(TEXT("OutlineWidth"), EdgeSize * (FaceMaps.Contains(I) ? 0.07f : 0.16f));
+        Ink->SetScalarParameterValue(TEXT("OutlineWidth"), EdgeSize * (FaceMaps.Contains(I) ? 0.12f : 0.16f));
         if (auto* const* Face = FaceMaps.Find(I))
         {
             Ink->SetTextureParameterValue(TEXT("FaceMap"), *Face);

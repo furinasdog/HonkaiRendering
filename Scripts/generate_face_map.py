@@ -1,4 +1,4 @@
-"""Generate a shared stylized face-shadow profile with Blender/MMD Tools and the MIT SDF tool.
+"""Generate a shared stylized face-shadow profile with Blender/MMD Tools.
 
 The smooth masks are an editable starting point, not recovered game LightMaps.
 Run in ordinary Python with installed numpy and OpenCV. Outputs stay in Saved.
@@ -8,20 +8,19 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 
 import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "Tools/sdf-shadow-threshold-map"))
-import sdftool
 
 
 def thresholds(coordinates):
     x = coordinates[:, :, 0] * 2 - 1
     height = coordinates[:, :, 1]
+    # Follow the narrowing jaw instead of ending a vertical shadow patch mid-cheek.
+    x /= np.sqrt(np.maximum(0.25, 1 - (height * 2 - 1) ** 2))
     # A broad curved terminator ignores geometric nose/lip cavities on every model.
     curve = 0.025 * np.cos(height * np.pi * 2)
     return [np.clip(0.5 + sign * 0.32 * x + curve, 0, 1) for sign in (1, -1)]
@@ -48,26 +47,9 @@ def main():
         raw = cv2.imread(str(work / "coordinates.png"), cv2.IMREAD_COLOR)
         assert raw is not None
         coordinates = raw[:, :, ::-1].astype(np.float32) / 255
-        channels = []
-        for side, threshold in enumerate(thresholds(coordinates)):
-            mask_dir = work / str(side)
-            mask_dir.mkdir()
-            masks = []
-            for frame, angle in enumerate(np.linspace(0, 1, 9)):
-                mask = ((threshold > angle) & (coordinates[:, :, 2] > 0.5)).astype(np.uint8) * 255
-                path = mask_dir / f"mask_{frame:02d}.png"
-                assert cv2.imwrite(str(path), mask)
-                masks.append(str(path))
-            target = work / f"threshold_{side}.png"
-            sdftool.generate_shadow_threshold_map(masks, str(target), bit_depth=8)
-            result = cv2.imread(str(target), cv2.IMREAD_GRAYSCALE)
-            assert result is not None and np.isfinite(result).all()
-            channels.append(result)
-            # Keep the authoring masks for review or paint-over, not in the public repo.
-            for path in mask_dir.iterdir():
-                dest = output / f"masks_{side}"
-                dest.mkdir(exist_ok=True)
-                (dest / path.name).write_bytes(path.read_bytes())
+        # The smooth coordinate field already defines a threshold. UV-space distance
+        # interpolation would bend it around eye holes and disconnected UV islands.
+        channels = [np.rint(t * 255).astype(np.uint8) for t in thresholds(coordinates)]
         entry = json.loads((work / "material.json").read_text(encoding="utf-8"))
         nose = entry.pop("nose")
         radius = np.sqrt(((coordinates[:, :, 0] - nose[0]) / 0.12) ** 2
@@ -88,4 +70,7 @@ if __name__ == "__main__":
     sample = np.array([[[0, .5, 1], [.5, .5, 1], [1, .5, 1]]])
     a, b = thresholds(sample)
     assert np.allclose(a, b[:, ::-1]) and np.all(a > 0) and np.all(a < 1)
+    disconnected = np.concatenate((sample, np.zeros_like(sample), sample), axis=1)
+    for result, expected in zip(thresholds(disconnected), (a, b)):
+        assert np.allclose(result[:, :3], expected) and np.allclose(result[:, -3:], expected)
     main()

@@ -59,7 +59,7 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
                 connect(face_map, "RGB", face_mask, "")
             surface_tint = node(u.MaterialExpressionVectorParameter, parameter_name="SurfaceTint", default_value=u.LinearColor(1, 1, 1, 1))
             ink = node(u.MaterialExpressionCustom, output_type=u.CustomMaterialOutputType.CMOT_FLOAT3,
-                       code="float3 inkColor = max(Ink, Base * float3(0.045, 0.030, 0.035)); return lerp(lerp(Base * SurfaceTint, inkColor, 0.55), inkColor, FaceMask);" if face_outline else "return max(Ink, Base * float3(0.045, 0.030, 0.035));")
+                       code="float3 inkColor = lerp(Base * SurfaceTint * float3(0.18, 0.065, 0.045), Ink, 0.25); return lerp(lerp(Base * SurfaceTint, inkColor, 0.55), inkColor, FaceMask);" if face_outline else "return max(Ink, Base * float3(0.14, 0.10, 0.12));")
             ink_inputs = []
             for input_name in ("Ink", "Base", "SurfaceTint", "FaceMask"):
                 i = u.CustomInput()
@@ -120,9 +120,15 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
             connect(base, "", composite, "Base")
             connect(sphere, "RGB", composite, "Sphere")
             connect(mode, "", composite, "Mode")
-            connect(strength, "", composite, "Strength")
+            sphere_strength = node(u.MaterialExpressionScalarParameter, parameter_name="SphereStrength", default_value=1)
+            connect(sphere_strength, "", composite, "Strength")
             base = composite
             if lit:
+                # AO is disabled in this viewer; its GBuffer byte carries the material's ramp row.
+                output(node(u.MaterialExpressionScalarParameter, parameter_name="RampRow", default_value=0), "", u.MaterialProperty.MP_AMBIENT_OCCLUSION)
+                toon_ramp = node(u.MaterialExpressionTextureObjectParameter, parameter_name="ToonRamp",
+                                 texture=u.load_asset("/Engine/EngineResources/WhiteSquareTexture"))
+                toon_ramp_enabled = node(u.MaterialExpressionScalarParameter, parameter_name="ToonRampEnabled", default_value=0)
                 face_enabled = node(u.MaterialExpressionScalarParameter, parameter_name="FaceEnabled", default_value=0)
                 face_map = node(u.MaterialExpressionTextureSampleParameter2D, parameter_name="FaceMap",
                                 texture=linear_white,
@@ -136,7 +142,7 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
                 face = node(u.MaterialExpressionCustom, output_type=u.CustomMaterialOutputType.CMOT_FLOAT3,
                             code=Path(__file__).with_name("HonkaiFace.hlsl").read_text(encoding="utf-8"))
                 face_inputs = []
-                for input_name in ("Base", "Map", "Light"):
+                for input_name in ("Base", "Map", "Light", "ToonRamp", "ToonRampEnabled"):
                     i = u.CustomInput()
                     i.set_editor_property("input_name", input_name)
                     face_inputs.append(i)
@@ -144,6 +150,8 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
                 connect(base, "", face, "Base")
                 connect(face_map, "RGB", face, "Map")
                 connect(local_light, "", face, "Light")
+                connect(toon_ramp, "", face, "ToonRamp")
+                connect(toon_ramp_enabled, "", face, "ToonRampEnabled")
                 body_enabled = node(u.MaterialExpressionOneMinus)
                 connect(face_enabled, "", body_enabled, "")
                 body_strength = node(u.MaterialExpressionMultiply)
@@ -190,15 +198,17 @@ def cel_lighting():
                 "Normal": u.SceneTextureId.PPI_WORLD_NORMAL,
                 "Stencil": u.SceneTextureId.PPI_CUSTOM_STENCIL,
                 "Depth": u.SceneTextureId.PPI_SCENE_DEPTH,
+                "MaterialAO": u.SceneTextureId.PPI_MATERIAL_AO,
                 "CustomDepth": u.SceneTextureId.PPI_CUSTOM_DEPTH}
     inputs = []
     for name in textures:
         i = u.CustomInput()
         i.set_editor_property("input_name", name)
         inputs.append(i)
-    i = u.CustomInput()
-    i.set_editor_property("input_name", "LightDirection")
-    inputs.append(i)
+    for name in ("LightDirection", "ToonAtlas"):
+        i = u.CustomInput()
+        i.set_editor_property("input_name", name)
+        inputs.append(i)
     shader.set_editor_property("inputs", inputs)
     for name, texture_id in textures.items():
         n = lib.create_material_expression(m, u.MaterialExpressionSceneTexture)
@@ -208,6 +218,10 @@ def cel_lighting():
     light.set_editor_property("parameter_name", "LightDirection")
     light.set_editor_property("default_value", u.LinearColor(0.82, -0.38, 0.42, 0))
     connect(light, "RGB", shader, "LightDirection")
+    atlas = lib.create_material_expression(m, u.MaterialExpressionTextureObjectParameter)
+    atlas.set_editor_property("parameter_name", "ToonAtlas")
+    atlas.set_editor_property("texture", u.load_asset("/Engine/EngineResources/WhiteSquareTexture"))
+    connect(atlas, "", shader, "ToonAtlas")
     output(shader, "", u.MaterialProperty.MP_EMISSIVE_COLOR)
     lib.layout_material_expressions(m)
     assert not lib.recompile_material(m)
