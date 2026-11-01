@@ -4,12 +4,15 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/GameModeBase.h"
 #include "Camera/CameraActor.h"
+#include "MmdEnhancement.h"
 #include "MmdViewer.generated.h"
 
 class UVrmAssetListObject;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class SMmdViewer;
+class USkeletalMeshComponent;
+class UTexture2D;
 
 UCLASS()
 class AMmdViewerController : public APlayerController
@@ -17,6 +20,7 @@ class AMmdViewerController : public APlayerController
 	GENERATED_BODY()
 public:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	void ImportArchive();
 	void LoadArchive(const FString& Path);
@@ -26,14 +30,59 @@ public:
 	void FocusModel();
 	void SetView(int32 View, bool Reverse);
 	void ToggleProjection();
-	FString Status = TEXT("导入 ZIP 压缩包以开始。");
+    void GenerateEnhancement(bool bForce = false, int32 Material = INDEX_NONE);
+    void CancelEnhancement();
+    void SetEnhanced(bool bEnabled);
+    void PreviewMaterial(int32 Index);
+    void ClearMaterialPreview();
+    int32 GetPreviewMaterial() const { return PreviewMaterialIndex; }
+    void ExportEnhancement();
+    void ClearEnhancementCache();
+    void SetBackground(int32 Preset);
+    void SetRenderScale(int32 Percent);
+    void SetEnhancementResolution(int32 Resolution);
+    bool HasModel() const { return LoadedAsset != nullptr; }
+    bool HasEnhancement() const { return !EnhancedFaceMaps.IsEmpty(); }
+    bool IsEnhanced() const { return bEnhanced; }
+    bool IsGenerating() const { return Enhancement.IsRunning(); }
+    FString GenerationText() const;
+    float GenerationProgress() const { return Enhancement.GetStatus().Progress; }
+    TArray<FString> MaterialNames;
+    int32 SelectedFaceMaterial = INDEX_NONE;
+    int32 EnhancementResolution = 512;
+    FString Status = TEXT("导入 ZIP 压缩包以开始。");
 	FString ModelName;
 	FString ModelInfo;
 	TArray<FString> ModelChoices;
 	bool bBusy = false;
 	bool bChoosing = false;
 private:
-	void UpdateCamera();
+#if WITH_DEV_AUTOMATION_TESTS
+    friend class FMmdEffectToggleTest;
+#endif
+    void UpdateCamera();
+    void SaveEffectChoice();
+    void HandleGenerationStatus(const FMmdEnhancementStatus& Progress);
+    bool ApplyGeneratedProfile(const FString& Directory);
+    UMaterialInstanceDynamic* MakeFaceOutline(int32 Index, UTexture2D* Map);
+    FMmdEnhancement Enhancement;
+    FMmdModelState ModelState;
+    FMmdEnhancementRequest GenerationRequest;
+    bool bGenerationPending = false;
+    FString LoadedModelPath;
+    FString EnhancementNotice;
+    FString LoadedResourceRoot;
+    bool bEnhanced = false;
+    int32 PreviewMaterialIndex = INDEX_NONE;
+    UPROPERTY() TObjectPtr<USkeletalMeshComponent> ModelMesh;
+    UPROPERTY() TObjectPtr<USkeletalMeshComponent> OutlineMesh;
+    UPROPERTY() TArray<TObjectPtr<UMaterialInstanceDynamic>> SurfaceMaterials;
+    UPROPERTY() TArray<TObjectPtr<UMaterialInstanceDynamic>> OriginalOutlines;
+    UPROPERTY() TArray<TObjectPtr<UMaterialInstanceDynamic>> EnhancedOutlines;
+    UPROPERTY() TMap<int32, TObjectPtr<UTexture2D>> OriginalFaceMaps;
+    UPROPERTY() TMap<int32, TObjectPtr<UTexture2D>> EnhancedFaceMaps;
+    TArray<FLinearColor> SurfaceTints;
+    UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> BackdropMaterial;
 	UFUNCTION() void OnModelLoaded();
 	TSharedPtr<SMmdViewer> Widget;
 	FString ImportDirectory;

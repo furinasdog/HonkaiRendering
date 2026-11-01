@@ -148,7 +148,7 @@ def material(name, translucent=False, outline=False, backdrop=False, two_sided=F
                     face_inputs.append(i)
                 face.set_editor_property("inputs", face_inputs)
                 connect(base, "", face, "Base")
-                connect(face_map, "RGB", face, "Map")
+                connect(face_map, "RGBA", face, "Map")
                 connect(local_light, "", face, "Light")
                 connect(toon_ramp, "", face, "ToonRamp")
                 connect(toon_ramp_enabled, "", face, "ToonRampEnabled")

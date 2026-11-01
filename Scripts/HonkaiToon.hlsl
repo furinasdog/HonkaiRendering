@@ -26,20 +26,22 @@ if (baseLuma < 0.0001)
 // shortcut: this diffuse estimate assumes the viewer's neutral light and nonmetallic material.
 float3 linearScene = Scene.rgb * View.OneOverPreExposure;
 float illumination = dot(linearScene, float3(0.2126, 0.7152, 0.0722)) / baseLuma;
-float width = max(fwidth(illumination), 0.035);
-float band = smoothstep(0.35 - width, 0.35 + width, illumination);
+float width = max(fwidth(illumination) * 0.5, 0.0001);
+float band = smoothstep(0.46 - width, 0.46 + width, illumination);
 // Material AO is reserved for the ramp index in the viewer's direct-light-only pipeline.
 float3 shadowColor = Texture2DSampleLevel(ToonAtlas, ToonAtlasSampler, float2(0.5 / 256.0, row), 0).rgb;
 float3 lightColor = Texture2DSampleLevel(ToonAtlas, ToonAtlasSampler, float2(255.5 / 256.0, row), 0).rgb;
 float3 lighting = lerp(shadowColor, lightColor, band);
 float warmPaint = 1 - smoothstep(-0.005, 0.015, base.b - base.r);
 // Keep cool paint cool, while warm/pink paint gets a redder shadow instead of a blue-grey wash.
-lighting *= lerp(float3(1, 1, 1), float3(1.04, 0.89, 0.94), warmPaint * (1 - band));
+float coolRamp = smoothstep(0.02, 0.08, shadowColor.b - shadowColor.r);
+lighting *= lerp(float3(1, 1, 1), float3(1.08, 0.68, 0.68), warmPaint * coolRamp * (1 - band));
 // Authored bright paint seeds HDR bloom; the separate face pass adds no HDR boost.
 float3 glow = base * smoothstep(0.82, 0.94, min(base.r, min(base.g, base.b))) * band * 0.3;
 // A pale-color shoulder brightens painted whites without lifting saturated colors or shadows.
-float pale = smoothstep(0.78, 0.85, max(base.r, max(base.g, base.b)));
-base = lerp(base, float3(1.0, 0.97, 0.94), pale * band * 0.8);
+float sourceSaturation = 1 - min(base.r, min(base.g, base.b)) / max(max(base.r, max(base.g, base.b)), 0.001);
+float pale = smoothstep(0.78, 0.85, max(base.r, max(base.g, base.b))) * (1 - smoothstep(0.08, 0.2, sourceSaturation));
+base = lerp(base, float3(1.0, 0.90, 0.865), pale * band * 0.8);
 float saturation = 1 - min(base.r, min(base.g, base.b)) / max(max(base.r, max(base.g, base.b)), 0.001);
 float warmMidtone = warmPaint * smoothstep(0.18, 0.4, saturation) * (1 - smoothstep(0.65, 0.85, saturation));
 base *= lerp(float3(1, 1, 1), float3(1.08, 1.0, 0.88), warmMidtone);

@@ -22,7 +22,8 @@ public class HonkaiRendering : ModuleRules
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "SlateCore", "VRM4U", "VRM4ULoader", "RenderCore", "Json", "ImageWrapper" });
-		RuntimeDependencies.Add("$(ProjectDir)/Scripts/Expand-MmdArchive.ps1", StagedFileType.NonUFS);
+		foreach (string Script in new string[] { "Expand-MmdArchive.ps1", "Prepare-MmdEnhancement.ps1", "enhancement-tools.json", "generate_enhancement.py", "bake_face_coordinates.py" })
+            RuntimeDependencies.Add("$(ProjectDir)/Scripts/" + Script, StagedFileType.NonUFS);
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			PublicSystemLibraries.AddRange(new string[] { "ole32.lib", "uuid.lib" });

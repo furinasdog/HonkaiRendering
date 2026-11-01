@@ -3,6 +3,9 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "EngineUtils.h"
+#include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
@@ -41,6 +44,8 @@
 #endif
 #include "Input/DragAndDrop.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Notifications/SProgressBar.h"
+#include "Brushes/SlateColorBrush.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Styling/CoreStyle.h"
 #include "UObject/ConstructorHelpers.h"
@@ -53,7 +58,7 @@ THIRD_PARTY_INCLUDES_END
 
 namespace
 {
-	FLinearColor Panel(0.045f, 0.057f, 0.075f, 1), Text(0.82f, 0.86f, 0.91f, 1), Muted(0.43f, 0.51f, 0.61f, 1);
+	FLinearColor Panel(0.92f, 0.935f, 0.95f, 1), Text(0.035f, 0.045f, 0.060f, 1), Muted(0.16f, 0.19f, 0.23f, 1);
 
     bool CopyToonRamp(UTexture2D* Texture, TArray<FColor>& Pixels, int32 Row)
     {
@@ -109,7 +114,7 @@ namespace
             && FPaths::GetExtension(Name).Equals(TEXT("png"), ESearchCase::IgnoreCase);
     }
 
-    TMap<int32, UTexture2D*> LoadFaceMaps(const FString& ModelPath, UVrmAssetListObject* Asset)
+    TMap<int32, UTexture2D*> LoadFaceMaps(const FString& ModelPath, UVrmAssetListObject* Asset, const FString& ExplicitProfile = FString())
     {
         TMap<int32, UTexture2D*> Result;
         TArray<uint8> ModelBytes;
@@ -118,8 +123,20 @@ namespace
         FSHA1::HashBuffer(ModelBytes.GetData(), ModelBytes.Num(), Hash.Hash);
         const FString SourceHash = Hash.ToString().ToLower();
         // Portable sidecars take precedence over the local authoring cache.
-        FString ProfilePath = ModelPath + TEXT(".toon.json");
-        if (!FPaths::FileExists(ProfilePath)) ProfilePath = FPaths::ProjectSavedDir() / TEXT("MmdShading") / SourceHash / TEXT("profile.json");
+        FString ProfilePath = ExplicitProfile.IsEmpty() ? ModelPath + TEXT(".toon.json") : ExplicitProfile;
+        if (ExplicitProfile.IsEmpty() && !FPaths::FileExists(ProfilePath))
+        {
+            const FString Legacy = FPaths::ProjectSavedDir() / TEXT("MmdShading") / SourceHash;
+            const FString Migrated = FMmdEnhancement::UserDataDir() / TEXT("LegacyShading") / SourceHash;
+            // Preserve earlier authoring results while keeping new runtime data outside the checkout.
+            if (!FPaths::FileExists(Migrated / TEXT("profile.json")) && FPaths::FileExists(Legacy / TEXT("profile.json")))
+            {
+                IFileManager::Get().MakeDirectory(*Migrated, true);
+                for (const TCHAR* File : {TEXT("face.png"), TEXT("coordinates.png"), TEXT("profile.json")})
+                    IFileManager::Get().Copy(*(Migrated / File), *(Legacy / File), false);
+            }
+            ProfilePath = Migrated / TEXT("profile.json");
+        }
         const int64 ProfileSize = IFileManager::Get().FileSize(*ProfilePath);
         if (ProfileSize <= 0 || ProfileSize > 65536) return Result;
         FString TextValue;
@@ -159,7 +176,7 @@ namespace
                 Texture->SRGB = false;
                 Texture->AddressX = Texture->AddressY = TA_Clamp;
                 Texture->UpdateResource();
-                Asset->Textures.Add(Texture);
+                if (ExplicitProfile.IsEmpty()) Asset->Textures.Add(Texture);
                 Result.Add(int32(Index), Texture);
             }
         }
@@ -168,7 +185,7 @@ namespace
     }
 	TSharedRef<STextBlock> Label(const FString& Value, int32 Size = 12, FLinearColor Color = Text)
 	{
-		return SNew(STextBlock).Text(FText::FromString(Value)).Font(FCoreStyle::GetDefaultFontStyle("Regular", Size)).ColorAndOpacity(Color);
+		return SNew(STextBlock).Text(FText::FromString(Value)).Font(FCoreStyle::GetDefaultFontStyle("Regular", Size)).ColorAndOpacity(Color).AutoWrapText(true);
 	}
 
 }
@@ -200,16 +217,28 @@ public:
     FCurveSequence MenuFade{0.f, 0.18f, ECurveEaseFunction::QuadInOut};
     bool bMenuOpen = false;
     bool bDragging = false;
+    FName CurrentPage = "Main";
+    FButtonStyle ButtonStyle;
 
     void Construct(const FArguments&, AMmdViewerController* InController)
     {
         Controller = InController;
+        ButtonStyle = FCoreStyle::Get().GetWidgetStyle<FButtonStyle>("Button");
+        ButtonStyle.SetNormal(FSlateColorBrush(FLinearColor(.79f, .82f, .85f)));
+        ButtonStyle.SetHovered(FSlateColorBrush(FLinearColor(.69f, .75f, .80f)));
+        ButtonStyle.SetPressed(FSlateColorBrush(FLinearColor(.60f, .68f, .75f)));
+        ButtonStyle.SetDisabled(FSlateColorBrush(FLinearColor(.84f, .85f, .86f)));
         ChildSlot
         [
             SNew(SOverlay)
             + SOverlay::Slot()
             [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
                 .BorderBackgroundColor(FLinearColor::Transparent)]
+            + SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Bottom).Padding(24)
+            [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(Panel).Padding(16)
+                .Visibility_Lambda([this] { return Controller.IsValid() && Controller->IsGenerating() && !IsMenuBlocking() ? EVisibility::HitTestInvisible : EVisibility::Collapsed; })
+                [SNew(SBox).WidthOverride(320)[SNew(STextBlock).ColorAndOpacity(Text).AutoWrapText(true)
+                    .Text_Lambda([this] { return FText::FromString(Controller.IsValid() ? Controller->GenerationText() + TEXT("\nEsc 查看进度或取消") : FString()); })]]]
             + SOverlay::Slot()
             [SAssignNew(MenuLayer, SBorder)
                 .BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
@@ -229,24 +258,30 @@ public:
     void CloseWindow()
     {
         bMenuOpen = false;
-        if (Controller.IsValid()) Controller->bChoosing = false;
+        if (Controller.IsValid()) { Controller->bChoosing = false; Controller->ClearMaterialPreview(); }
         MenuFade.PlayRelative(SharedThis(this), false);
         if (FSlateApplication::IsInitialized()) FSlateApplication::Get().SetKeyboardFocus(SharedThis(this));
     }
     TSharedRef<SButton> Button(const FString& Caption, TFunction<void()> Action)
     {
-        return SNew(SButton).ContentPadding(FMargin(16, 12))
+        return SNew(SButton).ButtonStyle(&ButtonStyle).ContentPadding(FMargin(16, 11))
             .IsEnabled_Lambda([this] { return Controller.IsValid() && !Controller->bBusy; })
             .OnClicked_Lambda([Action] { Action(); return FReply::Handled(); })[Label(Caption, 13)];
     }
     void OpenPage(FName Page = "Main")
     {
+        CurrentPage = Page;
+        MenuLayer->SetHAlign(Page == "FaceMaterial" ? HAlign_Right : HAlign_Center);
+        MenuLayer->SetBorderBackgroundColor(FLinearColor(0.008f, 0.012f, 0.02f, Page == "FaceMaterial" ? .20f : .60f));
         TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
         auto Add = [&](TSharedRef<SWidget> Widget) { Body->AddSlot().AutoHeight().Padding(0, 0, 0, 10)[Widget]; };
         FString Title = TEXT("菜单");
         if (Page == "Main")
         {
             Add(Button(TEXT("模型"), [this] { OpenPage("Model"); }));
+            Add(Button(TEXT("渲染"), [this] { OpenPage("Rendering"); }));
+            Add(Button(TEXT("背景"), [this] { OpenPage("Background"); }));
+            Add(Button(TEXT("设置"), [this] { OpenPage("Settings"); }));
             Add(Button(TEXT("视角"), [this] { OpenPage("View"); }));
             Add(Button(TEXT("返回角色"), [this] { CloseWindow(); }));
         }
@@ -259,8 +294,76 @@ public:
             {
                 Add(Label(Controller->ModelName, 14));
                 Add(Label(Controller->ModelInfo, 12, Muted));
+                Add(Button(TEXT("生成增强效果"), [this] { Controller->GenerateEnhancement(); OpenPage("Generation"); }));
+                Add(Button(TEXT("选择面部材质"), [this] { OpenPage("FaceMaterial"); }));
+                Add(Button(TEXT("导出增强数据"), [this] { Controller->ExportEnhancement(); OpenPage("Generation"); }));
             }
             Add(Button(TEXT("返回"), [this] { OpenPage(); }));
+        }
+        else if (Page == "Rendering")
+        {
+            Title = TEXT("渲染");
+            Add(SNew(STextBlock).Text_Lambda([this] { return FText::FromString(Controller->IsEnhanced() ? TEXT("当前：增强效果") : TEXT("当前：原效果")); }).ColorAndOpacity(Text));
+            Add(Label(TEXT("原效果保留增强前的渲染。切换不会改变摄像机和灯光。"), 12, Muted));
+            Add(SNew(STextBlock).Text_Lambda([this] { return FText::FromString(Controller->HasEnhancement() ? TEXT("增强数据已就绪，可直接切换。") : TEXT("尚无增强数据，请先生成增强效果。")); }).AutoWrapText(true).ColorAndOpacity(Muted));
+            Add(Button(TEXT("原效果"), [this] { Controller->SetEnhanced(false); }));
+            Add(Button(TEXT("增强效果"), [this] { Controller->SetEnhanced(true); }));
+            Add(Button(TEXT("生成 / 查看进度"), [this] { if (!Controller->IsGenerating()) Controller->GenerateEnhancement(); OpenPage("Generation"); }));
+            Add(Button(TEXT("返回"), [this] { OpenPage(); }));
+        }
+        else if (Page == "Generation")
+        {
+            Title = TEXT("增强效果");
+            Add(SNew(STextBlock).Text_Lambda([this] { return FText::FromString(Controller->GenerationText()); }).AutoWrapText(true).ColorAndOpacity(Text));
+            Add(SNew(SProgressBar).Percent_Lambda([this]() -> TOptional<float> { return FMath::Clamp(Controller->GenerationProgress(), 0.f, 1.f); })
+                .Visibility_Lambda([this] { return Controller->IsGenerating() ? EVisibility::Visible : EVisibility::Collapsed; }));
+            Add(Button(TEXT("取消生成"), [this] { Controller->CancelEnhancement(); }));
+            Add(Button(TEXT("生成 / 重试"), [this] { Controller->GenerateEnhancement(); }));
+            Add(Button(TEXT("重新生成（不复用缓存）"), [this] { Controller->GenerateEnhancement(true); }));
+            Add(Button(TEXT("选择面部材质"), [this] { OpenPage("FaceMaterial"); }));
+            Add(Button(TEXT("返回角色，后台继续"), [this] { CloseWindow(); }));
+            Add(Button(TEXT("返回模型菜单"), [this] { OpenPage("Model"); }));
+        }
+        else if (Page == "FaceMaterial")
+        {
+            Title = TEXT("选择面部材质");
+            Add(Label(TEXT("点选材质，角色上的对应部位会变为青色。\n确认它仅覆盖面部，再开始生成。"), 12, Muted));
+            TSharedRef<SVerticalBox> Choices = SNew(SVerticalBox);
+            for (int32 I = 0; I < Controller->MaterialNames.Num(); ++I)
+                Choices->AddSlot().AutoHeight().Padding(0, 0, 0, 6)[Button(FString::Printf(TEXT("%d  %s"), I + 1, *Controller->MaterialNames[I]), [this, I] { Controller->PreviewMaterial(I); })];
+            Add(SNew(SBox).HeightOverride(230)[SNew(SScrollBox) + SScrollBox::Slot()[Choices]]);
+            Add(SNew(STextBlock).Text_Lambda([this] { const int32 Index = Controller->GetPreviewMaterial(); return FText::FromString(Controller->MaterialNames.IsValidIndex(Index)
+                ? TEXT("已选择：") + Controller->MaterialNames[Index] : TEXT("尚未选择材质")); }).ColorAndOpacity(Text));
+            Add(Button(TEXT("使用此材质生成"), [this] { const int32 Index = Controller->GetPreviewMaterial(); if (Index != INDEX_NONE) { Controller->GenerateEnhancement(false, Index); OpenPage("Generation"); } }));
+            Add(Button(TEXT("返回"), [this] { Controller->ClearMaterialPreview(); OpenPage("Model"); }));
+        }
+        else if (Page == "Background")
+        {
+            Title = TEXT("背景");
+            Add(Button(TEXT("中性灰蓝"), [this] { Controller->SetBackground(0); }));
+            Add(Button(TEXT("浅灰"), [this] { Controller->SetBackground(1); }));
+            Add(Button(TEXT("深灰"), [this] { Controller->SetBackground(2); }));
+            Add(Button(TEXT("返回"), [this] { OpenPage(); }));
+        }
+        else if (Page == "Settings")
+        {
+            Title = TEXT("设置");
+            Add(Label(TEXT("抗锯齿：TSR"), 13));
+            Add(Button(TEXT("标准质量 · 100% 内部分辨率"), [this] { Controller->SetRenderScale(100); }));
+            Add(Button(TEXT("高质量 · 150% 内部分辨率"), [this] { Controller->SetRenderScale(150); }));
+            Add(SNew(STextBlock).Text_Lambda([this] { return FText::FromString(FString::Printf(TEXT("增强贴图尺寸：%d"), Controller->EnhancementResolution)); }).ColorAndOpacity(Text));
+            Add(Button(TEXT("增强贴图 · 512"), [this] { Controller->SetEnhancementResolution(512); }));
+            Add(Button(TEXT("增强贴图 · 1024"), [this] { Controller->SetEnhancementResolution(1024); }));
+            Add(Button(TEXT("打开用户数据目录"), [] { FPlatformProcess::ExploreFolder(*FMmdEnhancement::UserDataDir()); }));
+            Add(Button(TEXT("清理生成缓存"), [this] { OpenPage("ClearCache"); }));
+            Add(Button(TEXT("返回"), [this] { OpenPage(); }));
+        }
+        else if (Page == "ClearCache")
+        {
+            Title = TEXT("清理生成缓存");
+            Add(Label(TEXT("删除生成的缓存；保留导入的模型、原始资源和工具。\n当前模型恢复原效果，之后可重新生成。"), 12, Muted));
+            Add(Button(TEXT("确认清理缓存"), [this] { Controller->ClearEnhancementCache(); OpenPage("Generation"); }));
+            Add(Button(TEXT("返回"), [this] { OpenPage("Settings"); }));
         }
         else if (Page == "View")
         {
@@ -291,8 +394,9 @@ public:
         TSharedRef<SMmdMenu> Content = SNew(SMmdMenu, [Weak]
         {
             if (auto Self = Weak.Pin()) Self->CloseWindow();
-        }, SNew(SBox).WidthOverride(380)
-        [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(Panel).Padding(28)[Body]]);
+        }, SNew(SBox).WidthOverride(410)
+        [SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(Panel).Padding(28)
+            [SNew(SBox).MaxDesiredHeight(540)[SNew(SScrollBox) + SScrollBox::Slot()[Body]]]]);
         MenuLayer->SetContent(Content);
         bDragging = false;
         bMenuOpen = true;
@@ -435,6 +539,122 @@ bool FMmdMaterialsTest::RunTest(const FString& Parameters)
     }
     return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdEffectToggleTest, "HonkaiRendering.UI.EnhancementToggle",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMmdEffectToggleTest::RunTest(const FString& Parameters)
+{
+    auto* Parent = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_Toon"));
+    if (!TestNotNull(TEXT("Shared material available"), Parent)) return false;
+    const UWorld::InitializationValues Values = UWorld::InitializationValues().AllowAudioPlayback(false).CreatePhysicsScene(false).CreateNavigation(false).CreateAISystem(false);
+    UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Values);
+    if (!TestNotNull(TEXT("Test world created"), World)) return false;
+    auto* Controller = World->SpawnActor<AMmdViewerController>();
+    auto* Surface = UMaterialInstanceDynamic::Create(Parent, Controller);
+    auto* Original = UTexture2D::CreateTransient(1, 1);
+    auto* Enhanced = UTexture2D::CreateTransient(1, 1);
+    Controller->SurfaceMaterials.Add(Surface);
+    Controller->SurfaceTints.Add(FLinearColor(.8f, .7f, .6f, .4f));
+    Surface->SetVectorParameterValue(TEXT("Tint"), Controller->SurfaceTints[0]);
+    Controller->MaterialNames.Add(TEXT("Face"));
+    Controller->OriginalFaceMaps.Add(0, Original);
+    Controller->EnhancedFaceMaps.Add(0, Enhanced);
+    Controller->ViewerCamera = World->SpawnActor<ACameraActor>();
+    Controller->ViewerCamera->SetActorLocationAndRotation(FVector(50, 60, 70), FRotator(5, 15, 0));
+    const FTransform Camera = Controller->ViewerCamera->GetActorTransform();
+    const FVector Light = Controller->KeyDirection;
+    Controller->SetEnhanced(true);
+    UTexture* Actual = nullptr;
+    Surface->GetTextureParameterValue(TEXT("FaceMap"), Actual);
+    TestTrue(TEXT("Enhanced map applied without reload"), Actual == Enhanced);
+    Controller->SetEnhanced(false);
+    Surface->GetTextureParameterValue(TEXT("FaceMap"), Actual);
+    TestTrue(TEXT("Original map restored"), Actual == Original);
+    TestTrue(TEXT("Camera unchanged by A/B"), Controller->ViewerCamera->GetActorTransform().Equals(Camera));
+    TestTrue(TEXT("Light unchanged by A/B"), Controller->KeyDirection.Equals(Light));
+    Controller->PreviewMaterial(0);
+    FLinearColor Tint;
+    Surface->GetVectorParameterValue(TEXT("Tint"), Tint);
+    TestTrue(TEXT("Material selection visibly highlights"), !Tint.Equals(Controller->SurfaceTints[0]));
+    TestEqual(TEXT("Preview retains authored alpha"), Tint.A, Controller->SurfaceTints[0].A);
+    Controller->ClearMaterialPreview();
+    Surface->GetVectorParameterValue(TEXT("Tint"), Tint);
+    TestTrue(TEXT("Closing selection restores exact tint"), Tint.Equals(Controller->SurfaceTints[0]));
+
+    Controller->SetEnhanced(true);
+    Controller->SelectedFaceMaterial = INDEX_NONE;
+    Controller->ModelState.MaterialIndex = 0;
+    Controller->ModelState.ParametersJson = TEXT("{\"resolution\":256}");
+    Controller->ModelState.ProfileDirectory = TEXT("previous-valid-profile");
+    Controller->PreviewMaterial(0);
+    TestEqual(TEXT("Preview does not replace the pending generation material"), Controller->SelectedFaceMaterial, INDEX_NONE);
+    Controller->ClearMaterialPreview();
+    TestEqual(TEXT("Cancelled preview preserves the applied material selection"), Controller->ModelState.MaterialIndex, 0);
+    Controller->SetEnhancementResolution(1024);
+    TestTrue(TEXT("Changing pending resolution preserves the visible enhanced effect"), Controller->IsEnhanced());
+    Surface->GetTextureParameterValue(TEXT("FaceMap"), Actual);
+    TestTrue(TEXT("Changing pending resolution keeps the applied texture"), Actual == Enhanced);
+    TestEqual(TEXT("Applied parameters remain tied to the existing profile"), Controller->ModelState.ParametersJson, FString(TEXT("{\"resolution\":256}")));
+    TestEqual(TEXT("Pending resolution is independent"), Controller->EnhancementResolution, 1024);
+
+    // A/B saves the applied metadata, even while different generation settings are pending.
+    const FString StateFixture = FPaths::ProjectSavedDir() / TEXT("Tests") / (FGuid::NewGuid().ToString(EGuidFormats::Digits) + TEXT(".pmx"));
+    IFileManager::Get().MakeDirectory(*FPaths::GetPath(StateFixture), true);
+    const FString FixtureContent = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    if (!TestTrue(TEXT("State fixture created"), FFileHelper::SaveStringToFile(FixtureContent, *StateFixture))) { World->DestroyWorld(false); return false; }
+    Controller->LoadedModelPath = StateFixture;
+    Controller->SelectedFaceMaterial = INDEX_NONE;
+    Controller->SetEnhanced(false);
+    Controller->SetEnhanced(true);
+    const auto SavedState = FMmdEnhancement::ReadModelState(StateFixture);
+    TestEqual(TEXT("A/B persists applied material rather than pending selection"), SavedState.MaterialIndex, 0);
+    TestEqual(TEXT("A/B persists applied parameters rather than pending resolution"), SavedState.ParametersJson, FString(TEXT("{\"resolution\":256}")));
+
+    Controller->GenerationRequest.MaterialIndex = INDEX_NONE;
+    Controller->GenerationRequest.ParametersJson = TEXT("{\"resolution\":1024}");
+    for (const auto State : {EMmdEnhancementState::Failed, EMmdEnhancementState::Cancelled, EMmdEnhancementState::Succeeded})
+    {
+        FMmdEnhancementStatus Result;
+        Result.State = State;
+        Result.ResultDirectory = TEXT("missing-result-must-not-apply");
+        Controller->bGenerationPending = true;
+        Controller->HandleGenerationStatus(Result);
+        TestTrue(TEXT("Failed, cancelled or invalid generation retains the current enhanced effect"), Controller->IsEnhanced());
+        Surface->GetTextureParameterValue(TEXT("FaceMap"), Actual);
+        TestTrue(TEXT("Unaccepted generation retains the applied texture"), Actual == Enhanced);
+        TestEqual(TEXT("Unaccepted generation retains the applied material"), Controller->ModelState.MaterialIndex, 0);
+        TestEqual(TEXT("Unaccepted generation retains the applied parameters"), Controller->ModelState.ParametersJson, FString(TEXT("{\"resolution\":256}")));
+        TestEqual(TEXT("Unaccepted generation retains the previous profile"), Controller->ModelState.ProfileDirectory, FString(TEXT("previous-valid-profile")));
+        TestFalse(TEXT("Terminal result is consumed once"), Controller->bGenerationPending);
+    }
+    Controller->SetEnhanced(false);
+    Controller->EnhancementNotice = TEXT("restored-original-choice");
+    FMmdEnhancementStatus PreviousResult;
+    PreviousResult.State = EMmdEnhancementState::Succeeded;
+    Controller->HandleGenerationStatus(PreviousResult);
+    TestFalse(TEXT("A previous model's completed job cannot override restored original mode"), Controller->IsEnhanced());
+    TestEqual(TEXT("An unowned terminal result is not processed"), Controller->EnhancementNotice, FString(TEXT("restored-original-choice")));
+    TestTrue(TEXT("Pending settings and terminal results preserve the camera"), Controller->ViewerCamera->GetActorTransform().Equals(Camera));
+    TestTrue(TEXT("Pending settings and terminal results preserve lighting"), Controller->KeyDirection.Equals(Light));
+
+    TArray<uint8> FixtureBytes;
+    FFileHelper::LoadFileToArray(FixtureBytes, *StateFixture);
+    FSHAHash FixtureHash;
+    FSHA1::HashBuffer(FixtureBytes.GetData(), FixtureBytes.Num(), FixtureHash.Hash);
+    IFileManager::Get().Delete(*(FMmdEnhancement::UserDataDir() / TEXT("Models") / (FixtureHash.ToString().ToLower() + TEXT(".json"))));
+    IFileManager::Get().Delete(*StateFixture);
+    Controller->LoadedModelPath.Empty();
+    auto Menu = SNew(SMmdViewer, Controller);
+    for (const FName Page : {FName("Model"), FName("Rendering"), FName("Background"), FName("Settings"), FName("Generation"), FName("FaceMaterial")})
+    {
+        Menu->OpenPage(Page);
+        TestEqual(TEXT("Required page is reachable"), Menu->CurrentPage, Page);
+    }
+    Menu->CloseWindow();
+    TestTrue(TEXT("Light panel contrast"), Panel.R > .8f && Text.R < .1f);
+    World->DestroyWorld(false);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdOverlayTest, "HonkaiRendering.UI.InViewportMenu",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FMmdOverlayTest::RunTest(const FString& Parameters)
@@ -469,7 +689,7 @@ AMmdViewerGameMode::AMmdViewerGameMode()
 
 void AMmdViewerController::BeginPlay()
 {
-	Super::BeginPlay(); bShowMouseCursor = true;
+	Super::BeginPlay(); bShowMouseCursor = true; PrimaryActorTick.bCanEverTick = true; SetActorTickEnabled(true);
 	ToonMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_Toon.M_Toon"));
 	ToonTwoSidedMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_ToonTwoSided.M_ToonTwoSided"));
 	OutlineMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/MmdViewer/M_Outline.M_Outline"));
@@ -507,7 +727,7 @@ void AMmdViewerController::BeginPlay()
     Light->SetLightSourceAngle(2.f);
     Light->SetShadowBias(0.3f);
     Light->SetShadowSlopeBias(0.3f);
-    float LightYaw = 10.f;
+    float LightYaw = -5.f;
     FParse::Value(FCommandLine::Get(), TEXT("MmdLightYaw="), LightYaw);
     Key->SetActorRotation(FRotator(-45.f, LightYaw + 180.f, 0));
     KeyDirection = -Key->GetActorForwardVector();
@@ -522,6 +742,10 @@ void AMmdViewerController::BeginPlay()
         }
     }
     UpdateCamera();
+    for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+        if (auto* Component = It->FindComponentByClass<UStaticMeshComponent>())
+            if (auto* Material = Component->GetMaterial(0); Material && Material->GetName() == TEXT("M_Backdrop"))
+                BackdropMaterial = Component->CreateDynamicMaterialInstance(0);
 	Widget = SNew(SMmdViewer, this); GEngine->GameViewport->AddViewportWidgetContent(Widget.ToSharedRef());
 	FInputModeUIOnly Input; Input.SetWidgetToFocus(Widget); Input.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock); SetInputMode(Input);
 	FString AutoImport;
@@ -530,6 +754,7 @@ void AMmdViewerController::BeginPlay()
 
 void AMmdViewerController::EndPlay(const EEndPlayReason::Type Reason)
 {
+	Enhancement.Cancel();
 	if (Widget) Widget->CloseWindow();
 	if (Widget && GEngine && GEngine->GameViewport) GEngine->GameViewport->RemoveViewportWidgetContent(Widget.ToSharedRef());
 	Widget.Reset(); Super::EndPlay(Reason);
@@ -568,14 +793,24 @@ void AMmdViewerController::ImportArchive()
 void AMmdViewerController::LoadArchive(const FString& Path)
 {
     if (bBusy) return;
+    if (Enhancement.IsRunning()) { EnhancementNotice = TEXT("请先取消或等待增强任务，再导入其他模型。"); Widget->OpenPage("Generation"); return; }
     bBusy = true; Status = TEXT("正在展开压缩包…"); Widget->OpenPage("Status");
-    const FString Destination = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("MmdImports") / FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    const FString Storage = FMmdEnhancement::ImportsDir() / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    const FString Destination = Storage / TEXT("Resources");
+    const FString ArchiveCopy = Storage / TEXT("package.zip");
     const FString Script = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Scripts/Expand-MmdArchive.ps1"));
     TWeakObjectPtr<AMmdViewerController> Weak(this);
-    Async(EAsyncExecution::ThreadPool, [Weak, Path, Destination, Script]
+    Async(EAsyncExecution::ThreadPool, [Weak, Path, Destination, Script, Storage, ArchiveCopy]
     {
+        IFileManager::Get().MakeDirectory(*Storage, true);
+        if (IFileManager::Get().FileSize(*Path) <= 0 || IFileManager::Get().FileSize(*Path) > 512ll * 1024 * 1024
+            || IFileManager::Get().Copy(*ArchiveCopy, *Path, false) != COPY_OK)
+        {
+            AsyncTask(ENamedThreads::GameThread, [Weak] { if (Weak.IsValid() && Weak->Widget.IsValid()) { Weak->bBusy = false; Weak->Status = TEXT("无法复制 ZIP 到用户数据目录，或文件超过 512 MiB。"); Weak->Widget->OpenPage("Status"); } });
+            return;
+        }
         auto Quote = [](FString S) { return TEXT("'") + S.Replace(TEXT("'"), TEXT("''")) + TEXT("'"); };
-        FString Command = TEXT("& ([ScriptBlock]::Create([IO.File]::ReadAllText(") + Quote(Script) + TEXT("))) -ArchivePath ") + Quote(Path) + TEXT(" -Destination ") + Quote(Destination);
+        FString Command = TEXT("& ([ScriptBlock]::Create([IO.File]::ReadAllText(") + Quote(Script) + TEXT("))) -ArchivePath ") + Quote(ArchiveCopy) + TEXT(" -Destination ") + Quote(Destination);
         auto Utf16 = StringCast<UTF16CHAR>(*Command);
         FString Args = TEXT("-NoProfile -NonInteractive -EncodedCommand ") + FBase64::Encode(reinterpret_cast<const uint8*>(Utf16.Get()), Utf16.Length() * 2);
         FString StdOut, StdErr; int32 Code = -1;
@@ -584,7 +819,7 @@ void AMmdViewerController::LoadArchive(const FString& Path)
         if (Code == 0) IFileManager::Get().FindFilesRecursive(Choices, *Destination, TEXT("*.pmx"), true, false);
         AsyncTask(ENamedThreads::GameThread, [Weak, Destination, Choices = MoveTemp(Choices), Code, StdErr]() mutable
         {
-            if (!Weak.IsValid()) return;
+            if (!Weak.IsValid() || !Weak->Widget.IsValid()) return;
             auto* Self = Weak.Get(); Self->bBusy = false;
             if (Code != 0) { Self->Status = TEXT("无法展开 ZIP：文件损坏、加密、路径不安全或大小超限。详情见日志。"); UE_LOG(LogTemp, Warning, TEXT("MMD ZIP: %s"), *StdErr); Self->Widget->OpenPage("Status"); return; }
             if (Choices.IsEmpty()) { Self->Status = TEXT("压缩包中没有 PMX 文件。"); Self->Widget->OpenPage("Status"); return; }
@@ -601,6 +836,7 @@ void AMmdViewerController::LoadModel(const FString& Path)
 {
     if (bBusy || !ModelChoices.Contains(Path)) return;
     if (!ImportTemplate || !ImportTemplate->MtoonUnlitSet) { Status = TEXT("缺少 VRM4U 默认导入资源。"); return; }
+    Enhancement.Cancel(); bGenerationPending = false; ClearMaterialPreview();
     PendingPath = Path; bBusy = true; bChoosing = false; Status = TEXT("正在加载模型与贴图…"); Widget->OpenPage("Status");
     FImportOptionData Options;
     Options.ModelScale = 0.1f;
@@ -637,6 +873,9 @@ void AMmdViewerController::OnModelLoaded()
     Outline->SetCollisionEnabled(ECollisionEnabled::NoCollision); Outline->SetCastShadow(false); Outline->bPauseAnims = true;
     const bool bBaseColorOnly = FParse::Param(FCommandLine::Get(), TEXT("MmdBaseColor"));
     const auto FaceMaps = LoadFaceMaps(ImportDirectory / PendingPath, PendingAsset);
+    SurfaceMaterials.Reset(); OriginalOutlines.Reset(); EnhancedOutlines.Reset(); SurfaceTints.Reset();
+    OriginalFaceMaps.Reset(); EnhancedFaceMaps.Reset(); MaterialNames.Reset();
+    for (const auto& Entry : FaceMaps) OriginalFaceMaps.Add(Entry.Key, Entry.Value);
     Outline->SetVisibility(!bBaseColorOnly);
     int32 Missing = 0;
     for (int32 I = 0; I < Mesh->GetNumMaterials(); ++I)
@@ -695,6 +934,7 @@ void AMmdViewerController::OnModelLoaded()
         }
         UE_LOG(LogTemp, Display, TEXT("MMD_MATERIAL slot=%s texture=%s tint=%s translucent=%d two_sided=%d edge=%.0f edge_size=%.3f sphere=%.0f toon=%.0f"), *SlotName, *GetNameSafe(Texture), *Tint.ToString(), Transparent, TwoSided, EdgeEnabled, EdgeSize, SphereMode, ToonEnabled);
         Mesh->SetMaterial(I, Mat);
+        SurfaceMaterials.Add(Mat); SurfaceTints.Add(Tint); MaterialNames.Add(SlotName);
         auto* Ink = UMaterialInstanceDynamic::Create(FaceMaps.Contains(I) ? FaceOutlineMaterial : OutlineMaterial, Outline);
         Ink->SetVectorParameterValue(TEXT("SurfaceTint"), Tint);
         Ink->SetVectorParameterValue(TEXT("Tint"), EdgeColor);
@@ -706,9 +946,29 @@ void AMmdViewerController::OnModelLoaded()
         }
         if (Texture) Ink->SetTextureParameterValue(TEXT("BaseTexture"), Texture);
         Outline->SetMaterial(I, Ink);
+        OriginalOutlines.Add(Ink);
     }
     // The plugin owns geometry, skinning and texture decoding; this layer only sets the display material.
     if (ModelActor) ModelActor->Destroy(); ModelActor = NewActor; LoadedAsset = PendingAsset; PendingAsset = nullptr;
+    ModelMesh = Mesh; OutlineMesh = Outline;
+    LoadedModelPath = ImportDirectory / PendingPath; LoadedResourceRoot = ImportDirectory;
+    EnhancementNotice.Empty(); bGenerationPending = false;
+    ModelState = FMmdEnhancement::ReadModelState(LoadedModelPath);
+    SelectedFaceMaterial = ModelState.MaterialIndex;
+    if (SelectedFaceMaterial == INDEX_NONE && ModelState.ProfileDirectory.IsEmpty() && FaceMaps.Num() == 1)
+        for (const auto& Entry : FaceMaps) SelectedFaceMaterial = Entry.Key;
+    TSharedPtr<FJsonObject> Parameters;
+    if (FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(ModelState.ParametersJson), Parameters) && Parameters)
+    {
+        int32 Resolution = 512;
+        if (Parameters->TryGetNumberField(TEXT("resolution"), Resolution) && (Resolution == 256 || Resolution == 512 || Resolution == 1024)) EnhancementResolution = Resolution;
+    }
+    bEnhanced = false;
+    if (!ModelState.ProfileDirectory.IsEmpty())
+    {
+        const bool RestoreEnhanced = ModelState.bEnhanced;
+        if (ApplyGeneratedProfile(ModelState.ProfileDirectory)) SetEnhanced(RestoreEnhanced);
+    }
     FBoxSphereBounds Bounds = LoadedAsset->SkeletalMesh->GetBounds();
     if (auto* Render = LoadedAsset->SkeletalMesh->GetResourceForRendering(); Render && Render->LODRenderData.Num())
     {
@@ -759,6 +1019,212 @@ void AMmdViewerController::OnModelLoaded()
             GetWorldTimerManager().SetTimer(ExitHandle, [] { FGenericPlatformMisc::RequestExit(false); }, 12.f, false);
         }
     }
+}
+
+void AMmdViewerController::Tick(float DeltaSeconds)
+{
+    Super::Tick(DeltaSeconds);
+    Enhancement.Tick();
+    HandleGenerationStatus(Enhancement.GetStatus());
+}
+
+void AMmdViewerController::HandleGenerationStatus(const FMmdEnhancementStatus& Progress)
+{
+    // Only the request started for this loaded model may commit a terminal result.
+    if (!bGenerationPending || Progress.State == EMmdEnhancementState::Running || Progress.State == EMmdEnhancementState::Idle) return;
+    bGenerationPending = false;
+    if (Progress.State == EMmdEnhancementState::NeedsMaterial)
+    {
+        EnhancementNotice = TEXT("无法可靠确定面部材质，请在预览中选择。");
+        if (Widget) Widget->OpenPage("FaceMaterial");
+    }
+    else if (Progress.State == EMmdEnhancementState::Succeeded)
+    {
+        EnhancementNotice = TEXT("正在检查并应用增强数据…");
+        if (ApplyGeneratedProfile(Progress.ResultDirectory))
+        {
+            ModelState.MaterialIndex = GenerationRequest.MaterialIndex;
+            ModelState.ParametersJson = GenerationRequest.ParametersJson;
+            EnhancementNotice.Empty();
+            SetEnhanced(true);
+            if (EnhancementNotice.IsEmpty()) EnhancementNotice = Progress.bCacheHit ? TEXT("已复用有效缓存并应用增强效果。") : TEXT("增强效果已生成并应用。");
+            UE_LOG(LogTemp, Display, TEXT("MMD_ENHANCEMENT_APPLIED cache_hit=%d profile=%s"), Progress.bCacheHit, *Progress.ResultDirectory);
+        }
+        else EnhancementNotice = TEXT("增强数据校验失败，原有效果保持不变。");
+    }
+}
+
+FString AMmdViewerController::GenerationText() const
+{
+    if (!EnhancementNotice.IsEmpty()) return EnhancementNotice;
+    const auto& Progress = Enhancement.GetStatus();
+    if (GenerationRequest.ModelPath != LoadedModelPath || Progress.State == EMmdEnhancementState::Idle) return TEXT("生成面部卡通阴影与鼻部控制数据。模型保持可查看，完成后再应用。");
+    return Progress.Stage.IsEmpty() ? Progress.Message : Progress.Stage + TEXT("\n") + Progress.Message;
+}
+
+void AMmdViewerController::GenerateEnhancement(bool bForce, int32 Material)
+{
+    if (Enhancement.IsRunning()) return;
+    if (!LoadedAsset || LoadedModelPath.IsEmpty()) { EnhancementNotice = TEXT("请先导入模型。"); return; }
+    ClearMaterialPreview();
+    if (Material != INDEX_NONE) SelectedFaceMaterial = Material;
+    FMmdEnhancementRequest Request;
+    Request.ModelPath = LoadedModelPath;
+    Request.ResourceRoot = LoadedResourceRoot;
+    Request.MaterialIndex = SelectedFaceMaterial;
+    Request.ParametersJson = FString::Printf(TEXT("{\"resolution\":%d}"), EnhancementResolution);
+    Request.bForce = bForce;
+    EnhancementNotice.Empty();
+    GenerationRequest = Request;
+    bGenerationPending = Enhancement.Start(Request);
+}
+
+void AMmdViewerController::CancelEnhancement()
+{
+    EnhancementNotice.Empty();
+    Enhancement.Cancel();
+}
+
+UMaterialInstanceDynamic* AMmdViewerController::MakeFaceOutline(int32 Index, UTexture2D* Map)
+{
+    if (!OriginalOutlines.IsValidIndex(Index) || !OutlineMesh || !FaceOutlineMaterial) return nullptr;
+    auto* Ink = UMaterialInstanceDynamic::Create(FaceOutlineMaterial, OutlineMesh);
+    Ink->CopyParameterOverrides(OriginalOutlines[Index]);
+    float Width = 0;
+    OriginalOutlines[Index]->GetScalarParameterValue(TEXT("OutlineWidth"), Width);
+    if (!OriginalFaceMaps.Contains(Index)) Width *= 0.12f / 0.16f;
+    Ink->SetScalarParameterValue(TEXT("OutlineWidth"), Width);
+    Ink->SetTextureParameterValue(TEXT("FaceMap"), Map);
+    return Ink;
+}
+
+bool AMmdViewerController::ApplyGeneratedProfile(const FString& Directory)
+{
+    if (!LoadedAsset || !OutlineMesh) return false;
+    const auto Maps = LoadFaceMaps(LoadedModelPath, LoadedAsset, Directory / TEXT("profile.json"));
+    if (Maps.IsEmpty()) return false;
+    TArray<TObjectPtr<UMaterialInstanceDynamic>> NewOutlines = OriginalOutlines;
+    for (const auto& Entry : Maps)
+    {
+        if (!SurfaceMaterials.IsValidIndex(Entry.Key)) return false;
+        auto* Ink = MakeFaceOutline(Entry.Key, Entry.Value);
+        if (!Ink) return false;
+        NewOutlines[Entry.Key] = Ink;
+    }
+    EnhancedFaceMaps.Reset();
+    for (const auto& Entry : Maps) EnhancedFaceMaps.Add(Entry.Key, Entry.Value);
+    EnhancedOutlines = MoveTemp(NewOutlines);
+    ModelState.ProfileDirectory = Directory;
+    return true;
+}
+
+void AMmdViewerController::SetEnhanced(bool bEnabled)
+{
+    ClearMaterialPreview();
+    if (bEnabled && EnhancedFaceMaps.IsEmpty()) { EnhancementNotice = TEXT("尚无增强数据，请先生成增强效果。"); return; }
+    bEnhanced = bEnabled;
+    const auto& Maps = bEnhanced ? EnhancedFaceMaps : OriginalFaceMaps;
+    const auto& Outlines = bEnhanced ? EnhancedOutlines : OriginalOutlines;
+    const bool BaseOnly = FParse::Param(FCommandLine::Get(), TEXT("MmdBaseColor"));
+    for (int32 I = 0; I < SurfaceMaterials.Num(); ++I)
+    {
+        if (!SurfaceMaterials[I]) continue;
+        const auto* Map = Maps.Find(I);
+        SurfaceMaterials[I]->SetScalarParameterValue(TEXT("FaceEnabled"), Map && !BaseOnly ? 1.f : 0.f);
+        if (Map) SurfaceMaterials[I]->SetTextureParameterValue(TEXT("FaceMap"), Map->Get());
+        if (OutlineMesh && Outlines.IsValidIndex(I)) OutlineMesh->SetMaterial(I, Outlines[I]);
+    }
+    SaveEffectChoice();
+}
+
+void AMmdViewerController::SaveEffectChoice()
+{
+    if (LoadedModelPath.IsEmpty()) return;
+    ModelState.bEnhanced = bEnhanced;
+    // Pending UI choices must not relabel the profile that is currently applied.
+    FString Error;
+    if (!FMmdEnhancement::SaveModelState(LoadedModelPath, ModelState, Error)) EnhancementNotice = Error;
+}
+
+void AMmdViewerController::PreviewMaterial(int32 Index)
+{
+    if (Enhancement.IsRunning() || !SurfaceMaterials.IsValidIndex(Index)) return;
+    ClearMaterialPreview();
+    PreviewMaterialIndex = Index;
+    const FLinearColor Tint(.16f, .85f, .58f, SurfaceTints[Index].A);
+    SurfaceMaterials[Index]->SetVectorParameterValue(TEXT("Tint"), Tint);
+}
+
+void AMmdViewerController::ClearMaterialPreview()
+{
+    if (SurfaceMaterials.IsValidIndex(PreviewMaterialIndex) && SurfaceTints.IsValidIndex(PreviewMaterialIndex))
+        SurfaceMaterials[PreviewMaterialIndex]->SetVectorParameterValue(TEXT("Tint"), SurfaceTints[PreviewMaterialIndex]);
+    PreviewMaterialIndex = INDEX_NONE;
+}
+
+void AMmdViewerController::SetEnhancementResolution(int32 Resolution)
+{
+    if (Enhancement.IsRunning() || (Resolution != 256 && Resolution != 512 && Resolution != 1024) || Resolution == EnhancementResolution) return;
+    EnhancementResolution = Resolution;
+    EnhancementNotice = TEXT("下次生成将使用新尺寸；当前效果与已保存配置保持不变。");
+}
+
+void AMmdViewerController::SetBackground(int32 Preset)
+{
+    const FLinearColor Colors[] = {FLinearColor(.12f, .16f, .21f), FLinearColor(.72f, .73f, .74f), FLinearColor(.025f, .03f, .04f)};
+    if (BackdropMaterial && Preset >= 0 && Preset < UE_ARRAY_COUNT(Colors)) BackdropMaterial->SetVectorParameterValue(TEXT("Tint"), Colors[Preset]);
+}
+
+void AMmdViewerController::SetRenderScale(int32 Percent)
+{
+    if (Percent != 100 && Percent != 150) return;
+    if (auto* Variable = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"))) Variable->Set(Percent, ECVF_SetByCode);
+}
+
+void AMmdViewerController::ClearEnhancementCache()
+{
+    FString Error;
+    if (!FMmdEnhancement::ClearCache(Error)) { EnhancementNotice = Error; return; }
+    SetEnhanced(false);
+    EnhancedFaceMaps.Reset(); EnhancedOutlines.Reset(); ModelState.ProfileDirectory.Empty();
+    EnhancementNotice.Empty();
+    SaveEffectChoice();
+    if (EnhancementNotice.IsEmpty()) EnhancementNotice = TEXT("生成缓存已清理。导入的完整资源和原始文件均已保留。");
+}
+
+void AMmdViewerController::ExportEnhancement()
+{
+    if (ModelState.ProfileDirectory.IsEmpty()) { EnhancementNotice = TEXT("请先生成增强数据，再导出。"); return; }
+#if PLATFORM_WINDOWS
+    IFileOpenDialog* Dialog = nullptr;
+    const HRESULT Init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Dialog))))
+    {
+        Dialog->SetTitle(L"选择增强数据导出的父目录");
+        Dialog->SetOptions(FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+        const void* Parent = FSlateApplication::Get().FindBestParentWindowHandleForDialogs(Widget);
+        if (SUCCEEDED(Dialog->Show(static_cast<HWND>(const_cast<void*>(Parent)))))
+        {
+            IShellItem* Item = nullptr;
+            if (SUCCEEDED(Dialog->GetResult(&Item)))
+            {
+                PWSTR Folder = nullptr;
+                if (SUCCEEDED(Item->GetDisplayName(SIGDN_FILESYSPATH, &Folder)))
+                {
+                    const FString Destination = FString(Folder) / (FPaths::GetBaseFilename(LoadedModelPath) + TEXT("-增强-") + FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+                    CoTaskMemFree(Folder);
+                    FString Error;
+                    EnhancementNotice = FMmdEnhancement::Export(LoadedModelPath, ModelState.ProfileDirectory, Destination, Error)
+                        ? TEXT("已导出到：\n") + Destination + TEXT("\n将目录内的配置和 PNG 放到相同 PMX 旁，再一起打包即可。") : Error;
+                }
+                Item->Release();
+            }
+        }
+        Dialog->Release();
+    }
+    else EnhancementNotice = TEXT("无法打开导出目录选择器。");
+    if (SUCCEEDED(Init)) CoUninitialize();
+#endif
 }
 
 void AMmdViewerController::UpdateCamera()
